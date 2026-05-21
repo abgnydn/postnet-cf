@@ -93,11 +93,19 @@
 </head>
 <body>
   <h1>Postnet × Cloudflare</h1>
-  <p class="sub">A 129-parameter 2D classifier trained by federated SGD across whatever browser tabs you open. Workers compute ∇L on local batches in JS; the Cloudflare Durable Object averages and steps.</p>
+  <p class="sub">A 129-parameter 2D classifier trained by federated Adam across whatever browser tabs you open. Workers compute ∇L on local batches in JS; the Cloudflare Durable Object averages and steps. Switch the task from the dropdown to retrain the same architecture on a new objective.</p>
 
   <div class="panel">
     <button id="join">Join swarm</button>
     <button id="reset" class="secondary">Reset coordinator</button>
+    <label style="margin-left:14px;font-size:13px;">
+      task
+      <select id="task" style="font:inherit;padding:6px 8px;border:1px solid var(--ink);border-radius:5px;background:var(--paper);margin-left:4px;">
+        <option value="wave">wave · sin(2x) &gt; y</option>
+        <option value="circle">circle · x² + y² &lt; 1</option>
+        <option value="xor">xor · sign(x) ≠ sign(y)</option>
+      </select>
+    </label>
     <div class="stats">
       <div class="stat"><label>worker</label><b id="wid">—</b></div>
       <div class="stat"><label>round</label><b id="round">—</b></div>

@@ -80,7 +80,13 @@ function computeGradient(theta, batch) {
   return grad;
 }
 
-function makeBatch(seed, n) {
+function trueLabel(task, x, y) {
+  if (task === "circle") return (x * x + y * y) < 1 ? 1 : 0;
+  if (task === "xor")    return ((x > 0) !== (y > 0)) ? 1 : 0;
+  return Math.sin(2 * x) > y ? 1 : 0;  // "wave" default
+}
+
+function makeBatch(seed, n, task) {
   const rng = mulberry32(seed);
   const xs = new Float32Array(n);
   const ys = new Float32Array(n);
@@ -88,7 +94,7 @@ function makeBatch(seed, n) {
   for (let i = 0; i < n; i++) {
     xs[i] = (rng() - 0.5) * 4;
     ys[i] = (rng() - 0.5) * 4;
-    labels[i] = Math.sin(2 * xs[i]) > ys[i] ? 1 : 0;
+    labels[i] = trueLabel(task, xs[i], ys[i]);
   }
   return { xs, ys, labels };
 }
@@ -99,6 +105,7 @@ const $ = (id) => document.getElementById(id);
 const widEl = $("wid"), roundEl = $("round"), poolEl = $("pool");
 const peersEl = $("peers"), lossEl = $("loss"), logEl = $("log");
 const joinBtn = $("join"), resetBtn = $("reset");
+const taskSel = $("task");
 const chartCanvas = $("chart");
 const ctx = chartCanvas.getContext("2d");
 const boundaryCanvas = $("boundary");
@@ -109,6 +116,7 @@ widEl.textContent = workerId;
 
 let running = false;
 let history = [];
+let currentTask = "wave";
 
 function log(s) {
   const stamp = new Date().toLocaleTimeString();
@@ -158,15 +166,24 @@ function renderBoundary(theta) {
     }
   }
   bctx.putImageData(boundaryImage, 0, 0);
+  // Ground-truth overlay per task
   bctx.strokeStyle = "rgba(20,20,20,0.85)";
   bctx.lineWidth = 1.5;
   bctx.beginPath();
-  for (let px = 0; px < BG; px++) {
-    const x = -2 + (px / (BG - 1)) * 4;
-    const yTrue = Math.sin(2 * x);
-    const py = ((2 - yTrue) / 4) * (BG - 1);
-    if (px === 0) bctx.moveTo(px, py);
-    else bctx.lineTo(px, py);
+  const toPx = (x, y) => [((x + 2) / 4) * (BG - 1), ((2 - y) / 4) * (BG - 1)];
+  if (currentTask === "wave") {
+    for (let px = 0; px < BG; px++) {
+      const x = -2 + (px / (BG - 1)) * 4;
+      const [, py] = toPx(x, Math.sin(2 * x));
+      if (px === 0) bctx.moveTo(px, py);
+      else bctx.lineTo(px, py);
+    }
+  } else if (currentTask === "circle") {
+    bctx.arc(BG / 2, BG / 2, (1 / 4) * (BG - 1), 0, Math.PI * 2);
+  } else if (currentTask === "xor") {
+    const [cx, cy] = toPx(0, 0);
+    bctx.moveTo(0, cy); bctx.lineTo(BG, cy);
+    bctx.moveTo(cx, 0); bctx.lineTo(cx, BG);
   }
   bctx.stroke();
   bctx.strokeStyle = "rgba(0,0,0,0.15)";
@@ -205,6 +222,8 @@ async function pullHistory() {
     const r = await fetch("/api/state");
     const s = await r.json();
     history = s.history.filter(h => h.round >= 0);
+    currentTask = s.task || "wave";
+    if (taskSel && taskSel.value !== currentTask) taskSel.value = currentTask;
     drawChart();
     if (s.theta) renderBoundary(new Float32Array(s.theta));
     if (!running) {
@@ -221,13 +240,15 @@ async function runForever() {
     try {
       const pulled = await fetchTheta();
       updateStats(pulled);
+      currentTask = pulled.task || "wave";
+      if (taskSel && taskSel.value !== currentTask) taskSel.value = currentTask;
       const theta = new Float32Array(pulled.theta);
       const myRound = pulled.round;
       renderBoundary(theta);
 
-      // Fresh per-round, per-worker batch
+      // Fresh per-round, per-worker batch — labeled against the coord's current task
       const batchSeed = ((myRound + 1) * 1000003) ^ (workerId.charCodeAt(0) * 31 + workerId.charCodeAt(2));
-      const batch = makeBatch(batchSeed, BATCH_SIZE);
+      const batch = makeBatch(batchSeed, BATCH_SIZE, currentTask);
 
       const grad = computeGradient(theta, batch);
 
@@ -265,6 +286,25 @@ resetBtn.addEventListener("click", async () => {
   drawChart();
   log("reset");
 });
+
+if (taskSel) {
+  taskSel.addEventListener("change", async (e) => {
+    const newTask = e.target.value;
+    if (!confirm(`Switch task to "${newTask}"? Coord resets, all progress lost.`)) {
+      e.target.value = currentTask;
+      return;
+    }
+    await fetch("/api/set_task", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ task: newTask }),
+    });
+    history = [];
+    currentTask = newTask;
+    log(`task → ${newTask}`);
+    await pullHistory();
+  });
+}
 
 pullHistory();
 setInterval(pullHistory, 5000);

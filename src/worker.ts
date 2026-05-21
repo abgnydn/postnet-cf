@@ -27,6 +27,17 @@ const ADAM_B1 = 0.9;
 const ADAM_B2 = 0.999;
 const ADAM_EPS = 1e-8;
 
+type Task = "wave" | "circle" | "xor";
+const TASKS: Task[] = ["wave", "circle", "xor"];
+
+function trueLabel(task: Task, x: number, y: number): number {
+  switch (task) {
+    case "wave":   return Math.sin(2 * x) > y ? 1 : 0;
+    case "circle": return (x * x + y * y) < 1 ? 1 : 0;
+    case "xor":    return ((x > 0) !== (y > 0)) ? 1 : 0;
+  }
+}
+
 // --- Deterministic PRNG for the held-out test set ---
 function mulberry32(seed: number): () => number {
   let t = seed >>> 0;
@@ -52,14 +63,14 @@ function forward(theta: Float32Array, x: number, y: number): number {
   return 1 / (1 + Math.exp(-z));
 }
 
-function testLoss(theta: Float32Array): number {
+function testLoss(theta: Float32Array, task: Task): number {
   const rng = mulberry32(99999);
   let loss = 0;
   const N = 256;
   for (let i = 0; i < N; i++) {
     const x = (rng() - 0.5) * 4;
     const y = (rng() - 0.5) * 4;
-    const label = Math.sin(2 * x) > y ? 1 : 0;
+    const label = trueLabel(task, x, y);
     const p = forward(theta, x, y);
     const eps = 1e-7;
     loss += -(label * Math.log(p + eps) + (1 - label) * Math.log(1 - p + eps));
@@ -70,6 +81,7 @@ function testLoss(theta: Float32Array): number {
 // --- Coord Durable Object ---
 export class Coord extends DurableObject<Env> {
   private round = 0;
+  private task: Task = "wave";
   private theta: Float32Array;
   private adamM: Float32Array;     // Adam 1st moment
   private adamV: Float32Array;     // Adam 2nd moment
@@ -87,7 +99,7 @@ export class Coord extends DurableObject<Env> {
     for (let i = 0; i < P; i++) this.theta[i] = (rng() - 0.5) * 0.5;
     this.adamM = new Float32Array(P);
     this.adamV = new Float32Array(P);
-    this.lastLoss = testLoss(this.theta);
+    this.lastLoss = testLoss(this.theta, this.task);
     this.history.push({ round: -1, loss: this.lastLoss, n: 0, ts: this.bornAt });
   }
 
@@ -100,20 +112,34 @@ export class Coord extends DurableObject<Env> {
       return Response.json(this.summary());
     }
     if (url.pathname === "/api/reset" && request.method === "POST") {
-      const rng = mulberry32(Math.floor(Math.random() * 0xFFFFFFFF));
-      this.theta = new Float32Array(P);
-      for (let i = 0; i < P; i++) this.theta[i] = (rng() - 0.5) * 0.5;
-      this.adamM = new Float32Array(P);
-      this.adamV = new Float32Array(P);
-      this.adamStep = 0;
-      this.round = 0;
-      this.pool = [];
-      this.history = [];
-      this.lastLoss = testLoss(this.theta);
-      this.history.push({ round: -1, loss: this.lastLoss, n: 0, ts: Date.now() });
-      return Response.json({ ok: true });
+      this.resetState();
+      return Response.json({ ok: true, task: this.task });
+    }
+    if (url.pathname === "/api/set_task" && request.method === "POST") {
+      const body = await request.json<{ task?: string }>();
+      const t = body.task as Task;
+      if (!TASKS.includes(t)) {
+        return new Response("invalid task", { status: 400 });
+      }
+      this.task = t;
+      this.resetState();
+      return Response.json({ ok: true, task: this.task });
     }
     return new Response("not found", { status: 404 });
+  }
+
+  private resetState() {
+    const rng = mulberry32(Math.floor(Math.random() * 0xFFFFFFFF));
+    this.theta = new Float32Array(P);
+    for (let i = 0; i < P; i++) this.theta[i] = (rng() - 0.5) * 0.5;
+    this.adamM = new Float32Array(P);
+    this.adamV = new Float32Array(P);
+    this.adamStep = 0;
+    this.round = 0;
+    this.pool = [];
+    this.history = [];
+    this.lastLoss = testLoss(this.theta, this.task);
+    this.history.push({ round: -1, loss: this.lastLoss, n: 0, ts: Date.now() });
   }
 
   private async tick(request: Request): Promise<Response> {
@@ -159,7 +185,7 @@ export class Coord extends DurableObject<Env> {
       this.theta = next;
       const used = this.pool.length;
       this.pool = [];
-      this.lastLoss = testLoss(this.theta);
+      this.lastLoss = testLoss(this.theta, this.task);
       this.history.push({ round: this.round, loss: this.lastLoss, n: used, ts: Date.now() });
       if (this.history.length > 500) this.history.splice(0, this.history.length - 500);
       this.round += 1;
@@ -168,6 +194,7 @@ export class Coord extends DurableObject<Env> {
 
     return Response.json({
       round: this.round,
+      task: this.task,
       theta: Array.from(this.theta),
       P,
       lr: LR,
@@ -184,6 +211,8 @@ export class Coord extends DurableObject<Env> {
   private summary() {
     return {
       round: this.round,
+      task: this.task,
+      tasks: TASKS,
       P,
       lr: LR,
       target: TARGET_GRADIENTS,

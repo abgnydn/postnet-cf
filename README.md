@@ -77,14 +77,26 @@ npx wrangler deploy
 | `public/worker.js` | Browser worker: forward, manual backprop, POST loop, boundary rendering |
 | `wrangler.jsonc` | CF config: name, main, assets binding, Durable Object binding, SQLite-backed migration |
 
+## Tasks
+
+Three synthetic 2D objectives the same architecture trains on (selectable from the UI dropdown):
+
+| task | rule | difficulty |
+|---|---|---|
+| `wave` | `sin(2x) > y` | hardest — y-only basin attracts SGD; needs Adam/momentum to escape |
+| `circle` | `x² + y² < 1` | easy — radial structure, ReLU MLP nails it in ~30 rounds |
+| `xor` | `sign(x) ≠ sign(y)` | medium — the canonical "must use both inputs" test |
+
+Switching the task via the UI dropdown resets the coordinator (θ, Adam moments, history). Browsers fetch the active task in every tick and label their batches accordingly.
+
 ## Configuration
 
 Edit the constants at the top of `src/worker.ts`:
 
-- `H = 32` — hidden width (P = 4H+1)
-- `TARGET_GRADIENTS = 2` — pool size before SGD step (advance round)
-- `LR = 0.3` — base learning rate
-- `MOMENTUM = 0.9` — SGD momentum (β)
+- `H = 32` — hidden width (P = 4H+1 = 129 params)
+- `TARGET_GRADIENTS = 2` — pool size before Adam step (advance round)
+- `LR = 0.05` — Adam learning rate
+- `ADAM_B1 = 0.9`, `ADAM_B2 = 0.999`, `ADAM_EPS = 1e-8`
 
 Browser-side constants in `public/worker.js`:
 
