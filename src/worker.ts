@@ -1,13 +1,16 @@
 /**
- * Postnet × Cloudflare — federated SGD coord.
+ * Postnet × Cloudflare — federated Adam coord.
  *
  * Browser workers compute the gradient of BCE loss on their local batch,
  * POST it (129 floats = ~520 B) to the coord. The coord averages all
- * gradients in the current round's pool and applies an SGD step.
+ * gradients in the current round's pool and applies an Adam step.
+ *
+ * Adam was chosen after SGD+momentum delivered a noisy loss curve — Adam's
+ * per-parameter adaptive scaling produces smoother convergence on the
+ * same task, same substrate.
  *
  * Architecture: 2 → H → 1 with ReLU + sigmoid, H=32, P=129.
- * Wavy boundary task: label = sin(2x) > y. Backprop solves this fast where
- * ES got stuck in the y-only basin.
+ * Wavy boundary task: label = sin(2x) > y.
  */
 import { DurableObject } from "cloudflare:workers";
 
@@ -17,10 +20,12 @@ export interface Env {
 }
 
 const H = 32;
-const P = 4 * H + 1;          // 129 params
-const TARGET_GRADIENTS = 2;   // average at least N worker gradients before stepping
-const LR = 0.3;               // learning rate
-const MOMENTUM = 0.9;         // helps push through plateaus the y-only basin sits in
+const P = 4 * H + 1;            // 129 params
+const TARGET_GRADIENTS = 2;     // average at least N worker gradients before stepping
+const LR = 0.05;                // Adam typically wants smaller LR than SGD+momentum
+const ADAM_B1 = 0.9;
+const ADAM_B2 = 0.999;
+const ADAM_EPS = 1e-8;
 
 // --- Deterministic PRNG for the held-out test set ---
 function mulberry32(seed: number): () => number {
@@ -66,7 +71,9 @@ function testLoss(theta: Float32Array): number {
 export class Coord extends DurableObject<Env> {
   private round = 0;
   private theta: Float32Array;
-  private velocity: Float32Array;  // SGD-momentum buffer
+  private adamM: Float32Array;     // Adam 1st moment
+  private adamV: Float32Array;     // Adam 2nd moment
+  private adamStep = 0;            // step counter for bias correction
   private pool: Float32Array[] = [];
   private joined = new Set<string>();
   private lastLoss = -1;
@@ -78,7 +85,8 @@ export class Coord extends DurableObject<Env> {
     const rng = mulberry32(42);
     this.theta = new Float32Array(P);
     for (let i = 0; i < P; i++) this.theta[i] = (rng() - 0.5) * 0.5;
-    this.velocity = new Float32Array(P);
+    this.adamM = new Float32Array(P);
+    this.adamV = new Float32Array(P);
     this.lastLoss = testLoss(this.theta);
     this.history.push({ round: -1, loss: this.lastLoss, n: 0, ts: this.bornAt });
   }
@@ -95,7 +103,9 @@ export class Coord extends DurableObject<Env> {
       const rng = mulberry32(Math.floor(Math.random() * 0xFFFFFFFF));
       this.theta = new Float32Array(P);
       for (let i = 0; i < P; i++) this.theta[i] = (rng() - 0.5) * 0.5;
-      this.velocity = new Float32Array(P);
+      this.adamM = new Float32Array(P);
+      this.adamV = new Float32Array(P);
+      this.adamStep = 0;
       this.round = 0;
       this.pool = [];
       this.history = [];
@@ -129,16 +139,22 @@ export class Coord extends DurableObject<Env> {
     let advanced = false;
     if (this.pool.length >= TARGET_GRADIENTS) {
       // Average all gradients in the pool
-      const avg = new Float32Array(P);
-      for (const g of this.pool) {
-        for (let i = 0; i < P; i++) avg[i] += g[i];
+      const g = new Float32Array(P);
+      for (const gi of this.pool) {
+        for (let i = 0; i < P; i++) g[i] += gi[i];
       }
-      for (let i = 0; i < P; i++) avg[i] /= this.pool.length;
-      // SGD with momentum: v ← β·v + g ; θ ← θ − lr·v
+      for (let i = 0; i < P; i++) g[i] /= this.pool.length;
+      // Adam: m ← β1·m + (1-β1)·g ; v ← β2·v + (1-β2)·g² ; bias-correct ; θ ← θ - lr·m̂/(√v̂+ε)
+      this.adamStep += 1;
+      const bc1 = 1 - Math.pow(ADAM_B1, this.adamStep);
+      const bc2 = 1 - Math.pow(ADAM_B2, this.adamStep);
       const next = new Float32Array(P);
       for (let i = 0; i < P; i++) {
-        this.velocity[i] = MOMENTUM * this.velocity[i] + avg[i];
-        next[i] = this.theta[i] - LR * this.velocity[i];
+        this.adamM[i] = ADAM_B1 * this.adamM[i] + (1 - ADAM_B1) * g[i];
+        this.adamV[i] = ADAM_B2 * this.adamV[i] + (1 - ADAM_B2) * g[i] * g[i];
+        const mHat = this.adamM[i] / bc1;
+        const vHat = this.adamV[i] / bc2;
+        next[i] = this.theta[i] - LR * mHat / (Math.sqrt(vHat) + ADAM_EPS);
       }
       this.theta = next;
       const used = this.pool.length;
