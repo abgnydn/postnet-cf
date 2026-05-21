@@ -137,6 +137,7 @@ export class Coord extends DurableObject<Env> {
     this.adamStep = 0;
     this.round = 0;
     this.pool = [];
+    this.joined.clear();
     this.history = [];
     this.lastLoss = testLoss(this.theta, this.task);
     this.history.push({ round: -1, loss: this.lastLoss, n: 0, ts: Date.now() });
