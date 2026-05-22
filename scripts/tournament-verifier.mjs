@@ -95,11 +95,18 @@ class Worker {
     return JSON.parse(text);
   }
   async bootstrap() {
-    const s = await this.fetchJson(`${COORD}/api/tournament/snapshot`);
-    this.localTheta = new Float32Array(s.theta);
-    this.localRound = s.round;
+    const meta = await this.fetchJson(`${COORD}/api/tournament/snapshot`);
+    const r = await fetch(`${COORD}${meta.snapshot_url}`);
+    const buf = await r.arrayBuffer();
+    this.bytesDown += buf.byteLength;
+    const view = new DataView(buf);
+    const round = view.getUint32(0, true);
+    const p = view.getUint32(4, true);
+    if (p !== P) throw new Error(`P mismatch: server=${p} client=${P}`);
+    this.localTheta = new Float32Array(buf.slice(8));
+    this.localRound = round;
     this.bootstraps += 1;
-    return s;
+    return meta;
   }
   async tick(round, indices, values, delta) {
     const body = { worker_id: this.id, since_round: this.localRound };

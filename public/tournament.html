@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Postnet × Cloudflare — tournament (Phase 2)</title>
+  <title>Postnet × Cloudflare — tournament (Phase 3)</title>
   <style>
     :root {
       --ink: #1a1a1a;
@@ -103,7 +103,7 @@
 </head>
 <body>
   <div class="nav"><a href="/">← federated Adam demo</a></div>
-  <span class="phase">Phase 2 · delta-only broadcast</span>
+  <span class="phase">Phase 3 · R2 + binary snapshot</span>
   <h1>Postnet × Cloudflare — tournament</h1>
   <p class="sub">
     Same 2D classifier task as the federated-Adam page, but a different
@@ -113,7 +113,9 @@
     Phase 2: workers bootstrap θ once via <code>/api/tournament/snapshot</code>
     and maintain it locally. The coord ships only the accepted flip
     (~36 B) per round — both uplink and downlink are now independent
-    of model size.
+    of model size. Phase 3: bootstrap moves to a binary blob served from
+    an R2 bucket (versioned snapshots); the per-tick downlink stays
+    constant whether the model is 129 params or 2 B params.
   </p>
 
   <div class="panel">

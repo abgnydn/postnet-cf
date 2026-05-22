@@ -154,13 +154,24 @@ async function trackedFetch(url, init) {
 }
 
 async function bootstrap() {
-  const s = await trackedFetch("/api/tournament/snapshot");
-  localTheta = new Float32Array(s.theta);
-  localRound = s.round;
-  currentTask = s.task || "wave";
+  // Phase 3: snapshot is a binary blob served from R2 (or in-memory fallback).
+  // Wire format: 4-byte LE uint32 round, 4-byte LE uint32 P, then P × float32 (LE).
+  const meta = await trackedFetch("/api/tournament/snapshot");
+  const r = await fetch(meta.snapshot_url);
+  if (!r.ok) throw new Error(`snapshot.bin ${r.status}`);
+  const buf = await r.arrayBuffer();
+  bytesDown += buf.byteLength;
+  updateBwStat();
+  const view = new DataView(buf);
+  const round = view.getUint32(0, true);
+  const p = view.getUint32(4, true);
+  if (p !== P) throw new Error(`P mismatch: server=${p} client=${P}`);
+  localTheta = new Float32Array(buf, 8).slice();
+  localRound = round;
+  currentTask = meta.task || "wave";
   bootstrapCount += 1;
-  log(`bootstrap @ R${s.round} (${(s.theta.length * 4)} B)`);
-  return s;
+  log(`bootstrap @ R${round} via ${meta.snapshot_url} (${buf.byteLength} B binary)`);
+  return meta;
 }
 
 async function tickPoll() {

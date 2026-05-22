@@ -20,6 +20,7 @@ export interface Env {
   COORD: DurableObjectNamespace;
   TOURNAMENT: DurableObjectNamespace;
   ASSETS: Fetcher;
+  SNAPSHOTS: R2Bucket;
 }
 
 const H = 32;
@@ -89,6 +90,9 @@ interface AppliedFlip {
   values: number[];
 }
 
+const SNAPSHOT_EVERY = 50;          // re-publish snapshot every N accepted rounds
+const SNAPSHOT_KEY_PREFIX = "tournament/";
+
 export class Tournament extends DurableObject<Env> {
   private round = 0;
   private task: Task = "wave";
@@ -101,6 +105,8 @@ export class Tournament extends DurableObject<Env> {
   private considered = 0;      // count of proposals received total
   private history: { round: number; loss: number; accepted: boolean; delta: number; ts: number }[] = [];
   private appliedHistory: AppliedFlip[] = [];
+  private snapshotRound = 0;     // round of the most recent published snapshot
+  private snapshotKey = "";      // R2 object key of the most recent snapshot
   private bornAt = Date.now();
 
   constructor(state: DurableObjectState, env: Env) {
@@ -110,6 +116,30 @@ export class Tournament extends DurableObject<Env> {
     for (let i = 0; i < P; i++) this.theta[i] = (rng() - 0.5) * 0.5;
     this.lastLoss = testLoss(this.theta, this.task);
     this.history.push({ round: -1, loss: this.lastLoss, accepted: false, delta: 0, ts: this.bornAt });
+    // Fire-and-forget initial snapshot
+    state.blockConcurrencyWhile(async () => {
+      await this.publishSnapshot();
+    });
+  }
+
+  private async publishSnapshot(): Promise<void> {
+    const key = `${SNAPSHOT_KEY_PREFIX}r${this.round}.bin`;
+    // Layout: 4-byte LE uint32 round, 4-byte LE uint32 P, then P × float32 (LE).
+    const buf = new ArrayBuffer(8 + P * 4);
+    const view = new DataView(buf);
+    view.setUint32(0, this.round, true);
+    view.setUint32(4, P, true);
+    new Float32Array(buf, 8).set(this.theta);
+    try {
+      await this.env.SNAPSHOTS.put(key, buf, {
+        httpMetadata: { contentType: "application/octet-stream" },
+        customMetadata: { round: String(this.round), task: this.task, p: String(P) },
+      });
+      this.snapshotRound = this.round;
+      this.snapshotKey = key;
+    } catch {
+      // R2 not available — fall through, /snapshot endpoint will serve from memory
+    }
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -121,17 +151,49 @@ export class Tournament extends DurableObject<Env> {
       return Response.json(this.summary());
     }
     if (url.pathname === "/api/tournament/snapshot") {
-      // Bootstrap endpoint — full θ for new workers or workers who drifted.
-      // Phase 3 will move this payload to R2 (with a versioned URL).
+      // Phase 3: returns a pointer to the binary snapshot blob.
+      // Worker fetches the URL to get the actual θ — served from R2 (fast,
+      // cached, scales) when the snapshot is fresh; falls back to in-memory
+      // when R2 isn't available or the round is current.
       return Response.json({
-        round: this.round,
+        round: this.snapshotRound || this.round,
         task: this.task,
         P,
-        theta: Array.from(this.theta),
+        snapshot_url: `/api/tournament/snapshot.bin?round=${this.snapshotRound || this.round}`,
+        snapshot_bytes: 8 + P * 4,  // header (8) + P × float32
+      });
+    }
+    if (url.pathname === "/api/tournament/snapshot.bin") {
+      const wantRound = parseInt(url.searchParams.get("round") || "-1");
+      // Try R2 first if we have a key for the requested round
+      if (this.snapshotKey && (wantRound < 0 || wantRound === this.snapshotRound)) {
+        const obj = await this.env.SNAPSHOTS.get(this.snapshotKey);
+        if (obj) {
+          return new Response(obj.body, {
+            headers: {
+              "content-type": "application/octet-stream",
+              "x-snapshot-round": String(this.snapshotRound),
+              "x-snapshot-source": "r2",
+            },
+          });
+        }
+      }
+      // Fallback: serve current θ as binary from memory
+      const buf = new ArrayBuffer(8 + P * 4);
+      const view = new DataView(buf);
+      view.setUint32(0, this.round, true);
+      view.setUint32(4, P, true);
+      new Float32Array(buf, 8).set(this.theta);
+      return new Response(buf, {
+        headers: {
+          "content-type": "application/octet-stream",
+          "x-snapshot-round": String(this.round),
+          "x-snapshot-source": "memory",
+        },
       });
     }
     if (url.pathname === "/api/tournament/reset" && request.method === "POST") {
-      this.resetState();
+      await this.resetState();
       return Response.json({ ok: true, task: this.task });
     }
     if (url.pathname === "/api/tournament/set_task" && request.method === "POST") {
@@ -139,13 +201,13 @@ export class Tournament extends DurableObject<Env> {
       const t = body.task as Task;
       if (!TASKS.includes(t)) return new Response("invalid task", { status: 400 });
       this.task = t;
-      this.resetState();
+      await this.resetState();
       return Response.json({ ok: true, task: this.task });
     }
     return new Response("not found", { status: 404 });
   }
 
-  private resetState() {
+  private async resetState() {
     const rng = mulberry32(Math.floor(Math.random() * 0xFFFFFFFF));
     this.theta = new Float32Array(P);
     for (let i = 0; i < P; i++) this.theta[i] = (rng() - 0.5) * 0.5;
@@ -157,8 +219,11 @@ export class Tournament extends DurableObject<Env> {
     this.considered = 0;
     this.history = [];
     this.appliedHistory = [];
+    this.snapshotRound = 0;
+    this.snapshotKey = "";
     this.lastLoss = testLoss(this.theta, this.task);
     this.history.push({ round: -1, loss: this.lastLoss, accepted: false, delta: 0, ts: Date.now() });
+    await this.publishSnapshot();
   }
 
   private async tick(request: Request): Promise<Response> {
@@ -213,6 +278,11 @@ export class Tournament extends DurableObject<Env> {
         };
         this.appliedHistory.push(appliedFlip);
         if (this.appliedHistory.length > 1000) this.appliedHistory.shift();
+        // Re-anchor R2 snapshot every SNAPSHOT_EVERY accepted rounds so
+        // fresh workers bootstrap from a recent θ rather than R0.
+        if (this.accepted > 0 && this.accepted % SNAPSHOT_EVERY === 0) {
+          this.ctx.waitUntil(this.publishSnapshot());
+        }
       }
       this.lastLoss = testLoss(this.theta, this.task);
       this.history.push({

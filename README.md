@@ -152,7 +152,31 @@ At P = 129 Phase 2 is *not* a bandwidth win — JSON envelope overhead dominates
 
 Convergence is unchanged (3 workers × 400 rounds): circle 0.10 ✓ · xor 0.08 ✓ · wave 0.23 △.
 
-Drift handling: each worker sends its `localRound` as `since_round`. Server returns every applied flip with `round >= since_round`. If the coord's `appliedHistory` has been truncated past the worker's last sync (cap 1000), the worker detects via `oldest_applied_round > localRound + 1` and re-bootstraps via `/snapshot`. In Phase 3 the snapshot moves to R2 with a versioned URL.
+Drift handling: each worker sends its `localRound` as `since_round`. Server returns every applied flip with `round >= since_round`. If the coord's `appliedHistory` has been truncated past the worker's last sync (cap 1000), the worker detects via `oldest_applied_round > localRound + 1` and re-bootstraps via `/snapshot`.
+
+### Phase 3 — R2 snapshots + binary bootstrap
+
+The bootstrap snapshot moves to R2 with versioned keys. The `/api/tournament/snapshot` endpoint returns a JSON pointer; workers fetch the actual θ from `/api/tournament/snapshot.bin?round=N`, which serves the bytes from R2 (or in-memory fallback if R2 is cold). Wire format is binary: `[uint32 round][uint32 P][P × float32]`. Snapshot re-published every 50 accepted rounds so fresh workers don't have to replay the entire history.
+
+Bandwidth scaling, measured by `node scripts/bandwidth-sweep.mjs` (wire-format bytes, includes JSON envelope):
+
+| H | P | Adam ↓/tick | Phase 1 ↓/tick | Phase 2 ↓/tick | Bootstrap binary |
+|---|---|---|---|---|---|
+| 32 | 129 | 1.7 KB | 1.8 KB | 339 B | 524 B |
+| 128 | 513 | 6.4 KB | 6.5 KB | 339 B | 2.0 KB |
+| 512 | 2,049 | 24.1 KB | 24.2 KB | 340 B | 8.0 KB |
+| 2048 | 8,193 | 99.8 KB | 100.0 KB | 340 B | 32.0 KB |
+| 8192 | 32,769 | 509.0 KB | 509.2 KB | 341 B | 128.0 KB |
+| BitNet 2B | 1.5B | ~282 MB (overflows Worker 100 MB response cap) | same | 337 B (constant) | 282 MB via R2 range read |
+
+At 8192-hidden-unit models, Phase 2 is **~1,500× smaller** than Adam or Phase 1 per tick. At BitNet 2B, the linear protocols don't fit in a Worker response at all — Phase 2 still ships ~340 B/tick because the wire payload is the accepted flip and a small JSON envelope, not the model.
+
+R2 setup: `wrangler.jsonc` declares an `R2_BUCKET` binding named `SNAPSHOTS`. Local `wrangler dev` emulates R2 automatically; for `wrangler deploy` create the bucket once:
+```bash
+npx wrangler r2 bucket create postnet-snapshots
+```
+
+The DO writes snapshots via `env.SNAPSHOTS.put(key, buf, ...)` and reads via `env.SNAPSHOTS.get(key)`. Response headers `x-snapshot-source: r2 | memory` make it easy to verify which path served the bytes.
 
 ## Open questions / future moves
 

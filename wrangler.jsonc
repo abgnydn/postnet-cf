@@ -23,5 +23,8 @@
       "new_sqlite_classes": ["Tournament"]
     }
   ],
+  "r2_buckets": [
+    { "binding": "SNAPSHOTS", "bucket_name": "postnet-snapshots", "preview_bucket_name": "postnet-snapshots-preview" }
+  ],
   "observability": { "enabled": true }
 }
