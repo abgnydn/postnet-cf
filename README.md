@@ -6,6 +6,10 @@ Federated learning where workers are browser tabs and the coordinator is a Cloud
 npm install
 npx wrangler dev --port 8787
 # → open http://localhost:8787 (or /dashboard.html for all four side-by-side)
+
+# Share with friends as cross-machine peers (requires cloudflared):
+bash scripts/expose.sh
+# → prints a *.trycloudflare.com URL — anyone who opens it joins the same swarm
 ```
 
 ## What's in here
