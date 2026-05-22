@@ -144,6 +144,17 @@ function sampleText(theta, seed, n) {
   return out.map(k => k === 0 ? ' ' : String.fromCharCode(97 + k - 1)).join('');
 }
 
+// Phase 23: attack-mode toggle. Set via URL param ?attack=1 or via the
+// checkbox in /lm.html. When true, this worker submits random flips with
+// claimed delta=-10 (the standard byzantine pattern).
+function readAttackFlag() {
+  if (typeof location !== "undefined") {
+    if (new URLSearchParams(location.search).get("attack") === "1") return true;
+  }
+  const el = typeof document !== "undefined" ? document.getElementById("attack") : null;
+  return !!(el && el.checked);
+}
+
 // --- UI bindings ---
 const workerId = `lm-${Math.random().toString(36).slice(2, 8)}`;
 const myShard = shardForWorker(workerId);
@@ -370,23 +381,33 @@ async function runForever() {
 
       const seed = ((localRound + 1) * 1000003) ^ (workerId.charCodeAt(0) * 31 + workerId.charCodeAt(2));
       const rng = mulberry32(seed);
-      // Phase 7: score only on this worker's private text shard
-      const lossBefore = textLoss(localTheta, myShard.start, myShard.end);
-      let best = null;
-      for (let t = 0; t < TRIALS_PER_REPORT; t++) {
+      let best;
+      if (readAttackFlag()) {
+        // Phase 23: byzantine — random flip, claimed huge improvement
         const { indices, values } = proposeFlip(localTheta, rng);
-        for (let i = 0; i < P; i++) trial[i] = localTheta[i];
-        for (let k = 0; k < indices.length; k++) trial[indices[k]] = values[k];
-        const lossAfter = textLoss(trial, myShard.start, myShard.end);
-        const delta = lossAfter - lossBefore;
-        if (!best || delta < best.delta) best = { indices, values, delta };
+        best = { indices, values, delta: -10 };
+      } else {
+        // Phase 7: score only on this worker's private text shard
+        const lossBefore = textLoss(localTheta, myShard.start, myShard.end);
+        best = null;
+        for (let t = 0; t < TRIALS_PER_REPORT; t++) {
+          const { indices, values } = proposeFlip(localTheta, rng);
+          for (let i = 0; i < P; i++) trial[i] = localTheta[i];
+          for (let k = 0; k < indices.length; k++) trial[indices[k]] = values[k];
+          const lossAfter = textLoss(trial, myShard.start, myShard.end);
+          const delta = lossAfter - lossBefore;
+          if (!best || delta < best.delta) best = { indices, values, delta };
+        }
       }
 
       const reported = await submitBest(localRound, best.indices, best.values, best.delta);
       updateStats(reported);
       await reconcile(reported);
-      if (reported.advanced) {
-        log(`R${localRound - 1} → R${localRound} · Δ ${best.delta.toFixed(4)} · loss ${reported.last_loss.toFixed(4)} · ↑${fmtBytes(bytesUp)} ↓${fmtBytes(bytesDown)}`);
+      if (reported.quarantined) {
+        log(`⚠ QUARANTINED · proposals dropped — defense detected fraud`);
+      } else if (reported.advanced) {
+        const mode = readAttackFlag() ? " [attacker]" : "";
+        log(`R${localRound - 1} → R${localRound} · Δ ${best.delta.toFixed(4)} · loss ${reported.last_loss.toFixed(4)}${mode}`);
         if (localRound % 25 === 0) updateSample();
       } else if (reported.rejected) {
         log(`stale @ R${localRound}`);
