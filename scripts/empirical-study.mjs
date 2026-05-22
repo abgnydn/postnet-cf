@@ -115,6 +115,10 @@ class Worker {
     this.id = `${id}-s${seedSuffix}`;
     this.variant = variant;
     this.isByzantine = id.includes("byz");
+    // Phase 14: smart byzantine — act honest for first SMART_HONEST_WINS wins
+    // then attack. Tests sliding-window vs cumulative fraud detection.
+    this.isSmartByz = id.includes("smart");
+    this.smartWinsObserved = 0;
     this.useShards = variant === "sharded" || variant.startsWith("byzantine");
     this.localTheta = null;
     this.localRound = -1;
@@ -176,7 +180,26 @@ async function runWorker(worker, stopAt) {
     if (r === "bootstrap") { await worker.bootstrap(); continue; }
     const rng = mulberry32(((worker.localRound + 1) * 1000003) ^ (worker.id.charCodeAt(0) * 31 + worker.id.charCodeAt(2)));
     let best;
-    if (worker.isByzantine) {
+    if (worker.isSmartByz) {
+      // First 9 wins: act honest (passes cumulative detection's >=10 threshold).
+      // After that: attack. Sliding window over last 20 should catch this.
+      const SMART_HONEST_WINS = 9;
+      if (worker.smartWinsObserved < SMART_HONEST_WINS) {
+        // Honest behavior
+        const lossBefore = textLoss(worker.localTheta, shard.start, shard.end);
+        best = null;
+        for (let t = 0; t < TRIALS; t++) {
+          const { indices, values } = proposeFlip(worker.localTheta, rng);
+          for (let i = 0; i < P; i++) trial[i] = worker.localTheta[i];
+          for (let k = 0; k < indices.length; k++) trial[indices[k]] = values[k];
+          const delta = textLoss(trial, shard.start, shard.end) - lossBefore;
+          if (!best || delta < best.delta) best = { indices, values, delta };
+        }
+      } else {
+        const { indices, values } = proposeFlip(worker.localTheta, rng);
+        best = { indices, values, delta: -10 };
+      }
+    } else if (worker.isByzantine) {
       const { indices, values } = proposeFlip(worker.localTheta, rng);
       best = { indices, values, delta: -10 };
     } else {
@@ -190,17 +213,30 @@ async function runWorker(worker, stopAt) {
         if (!best || delta < best.delta) best = { indices, values, delta };
       }
     }
+    const myIndices = best.indices;
+    const submittedRound = worker.localRound;
     const reported = await worker.tick(worker.localRound, best.indices, best.values, best.delta);
     worker.reconcile(reported);
+    // Phase 14: smart-byz win detection — check if the winning flip's indices match ours
+    if (worker.isSmartByz && Array.isArray(reported.applied_since)) {
+      for (const flip of reported.applied_since) {
+        if (flip.round === submittedRound && flip.indices.length === myIndices.length
+            && flip.indices.every((x, i) => x === myIndices[i])) {
+          worker.smartWinsObserved += 1;
+          break;
+        }
+      }
+    }
     await new Promise(r => setTimeout(r, 1));
   }
 }
 
-async function runOneSession(variant, seedSuffix, attackerCount = 0) {
+async function runOneSession(variant, seedSuffix, attackerCount = 0, attackerKind = "dumb") {
   await fetch(`${COORD}/api/lm/reset`, { method: "POST" });
   await new Promise(r => setTimeout(r, 50));
   const honest = ["alpha", "delta", "bravo"];
-  const attackers = ["byz0", "byz1", "byz2"].slice(0, attackerCount);
+  const attackerPrefix = attackerKind === "smart" ? "smart" : "byz";
+  const attackers = ["0", "1", "2"].slice(0, attackerCount).map(n => `${attackerPrefix}${n}`);
   let workerIds;
   switch (variant) {
     case "vanilla":   workerIds = honest; break;
@@ -224,7 +260,32 @@ function meanStd(arr) {
 
 (async () => {
   const mode = process.env.MODE || "variants";
-  if (mode === "attackers") {
+  if (mode === "smart") {
+    // Phase 14: compare dumb vs smart attacker at fixed count = 1
+    const kinds = ["dumb", "smart"];
+    console.log(`Smart-attacker comparison · ${N_SEEDS} seeds × ${ROUNDS_PER_RUN} rounds per cell\n`);
+    console.log(`(3 honest + 1 attacker; smart acts honest for 9 wins then attacks)\n`);
+    const results = {};
+    for (const kind of kinds) {
+      results[kind] = [];
+      process.stdout.write(`${kind.padEnd(8)}`);
+      for (let s = 0; s < N_SEEDS; s++) {
+        const r = await runOneSession("byzantine", s, 1, kind);
+        results[kind].push(r.loss);
+        process.stdout.write(`  ${r.loss.toFixed(4)}`);
+      }
+      const ms = meanStd(results[kind]);
+      console.log(`   →  ${ms.mean.toFixed(4)} ± ${ms.std.toFixed(4)}`);
+    }
+    console.log("\n=== SMART-ATTACKER SUMMARY ===");
+    const base = meanStd(results.dumb);
+    for (const kind of kinds) {
+      const ms = meanStd(results[kind]);
+      const delta = ms.mean - base.mean;
+      const sign = delta >= 0 ? "+" : "";
+      console.log(`${kind.padEnd(8)}  ${ms.n}  ${ms.mean.toFixed(4)}  ${ms.std.toFixed(4)}  ${sign}${delta.toFixed(4)}`);
+    }
+  } else if (mode === "attackers") {
     // Phase 13: sweep attacker count from 0 to 3 (honest count stays at 3)
     const counts = [0, 1, 2, 3];
     const results = {};

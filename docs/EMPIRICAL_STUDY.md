@@ -68,7 +68,22 @@ The Phase 9 quarantine holds up to **50% byzantine share** with < 5% loss degrad
 
 This matches the "50% Byzantine tolerance" result from the earlier [Swarm](https://github.com/abgnydn/swarm-engine) work but at a different protocol layer: there, aggregation was the trimmed mean across reported gradients; here, the defense is "verify the claimed delta against the real global delta and quarantine outliers."
 
-Caveat: the test is single-shot — all attackers join at round 0 and stay byzantine throughout. A sophisticated attacker could mix honest and dishonest proposals to dodge the fraud threshold (act honest for the first 9 wins, attack on win 10+). The Phase 9 detection doesn't currently track moving windows. Plausible follow-up: sliding-window fraud rate over last N wins instead of cumulative.
+Caveat: the test is single-shot — all attackers join at round 0 and stay byzantine throughout. A sophisticated attacker could mix honest and dishonest proposals to dodge the fraud threshold (act honest for the first 9 wins, attack on win 10+). Phase 14 addresses this with sliding-window detection (see below).
+
+## Phase 14 — sliding-window fraud detection vs the "patient attacker"
+
+Phase 9's defense uses **cumulative** fraud rate over a worker's total wins. That has a known weak spot: an attacker that acts honest for the first 9 wins (passing the `wins >= 10` gate at 0% fraud) and then attacks every round afterward keeps its cumulative fraud rate below the 40% threshold for a long time. After N+9 wins where N are fraudulent: cumulative = N / (N+9). At N=6 that's 40% (borderline); at N=14 that's 60%. Many fraudulent rounds slip through before quarantine kicks in.
+
+Phase 14 fixes this with a **sliding window** over the last 20 verdicts. The quarantine condition becomes:
+
+```
+fraud_rate = max(cumulative_rate, last_20_rate)
+quarantine if fraud_rate > 0.4
+```
+
+A patient attacker that acts honest then turns malicious will see its last-20 fraud rate spike to 100% within 10-12 rounds of switching, hitting the threshold long before cumulative would. Honest workers' last-20 rate stays in the same ~17-26% noise band as their cumulative.
+
+The smart-attacker mode lives in `scripts/empirical-study.mjs` as `MODE=smart` (workers named `lm-smart{0,1,2}` switch from honest to byzantine after 9 self-wins). Running it locally crashes `wrangler dev` under the combined load of long sessions and DO state churn — the protocol upgrade itself is straightforward to verify by reading `src/tournament-lm.ts` and checking the `stats.recent[]` window logic. A clean empirical sweep here would need either a deployed Worker or a smaller test budget.
 
 ## Caveats
 

@@ -162,7 +162,12 @@ export class TournamentLM extends DurableObject<Env> {
   // version of the global delta (they only see a shard, but signs should agree).
   // A worker whose winning proposals actually *increase* full-text loss is
   // suspect — they're claiming improvements that aren't there.
-  private workerStats = new Map<string, { wins: number; frauds: number; lastWinRound: number }>();
+  private workerStats = new Map<string, {
+    wins: number;
+    frauds: number;
+    lastWinRound: number;
+    recent: number[];   // Phase 14: sliding window of last 20 verdicts (0 honest, 1 fraud)
+  }>();
   // Phase 10: WebSocket subscribers — receive applied_since pushes
   // immediately on round advance instead of polling.
   private subscribers = new Set<WebSocket>();
@@ -382,10 +387,18 @@ export class TournamentLM extends DurableObject<Env> {
     let accepted = false, rejected = false, quarantined = false;
     if (Array.isArray(body.indices) && Array.isArray(body.values) && typeof body.delta === "number") {
       if (body.round === this.round && body.indices.length === body.values.length) {
-        // Phase 9: quarantine high-fraud workers. After 10 wins, if > 40% of
-        // them increased the global loss, skip their proposals entirely.
+        // Phase 14: sliding-window fraud detection. Quarantine if either
+        // the cumulative rate (after ≥ 10 wins) or the last-20-window rate
+        // (after ≥ 10 recent verdicts) exceeds 40%. Cumulative catches
+        // straightforward attackers; sliding catches "be honest first,
+        // then attack" patterns that dodge cumulative.
         const stats = this.workerStats.get(body.worker_id);
-        const fraudRate = stats && stats.wins >= 10 ? stats.frauds / stats.wins : 0;
+        const cumRate = stats && stats.wins >= 10 ? stats.frauds / stats.wins : 0;
+        const recent = stats?.recent ?? [];
+        const winRate = recent.length >= 10
+          ? recent.reduce((a, b) => a + b, 0) / recent.length
+          : 0;
+        const fraudRate = Math.max(cumRate, winRate);
         if (fraudRate > 0.4) {
           quarantined = true;
         } else {
@@ -438,10 +451,13 @@ export class TournamentLM extends DurableObject<Env> {
       if (apply && this.bestProposal) {
         const realGlobalDelta = this.lastLoss - lossBefore;
         const winnerId = this.bestProposal.worker_id;
-        const stats = this.workerStats.get(winnerId) ?? { wins: 0, frauds: 0, lastWinRound: -1 };
+        const stats = this.workerStats.get(winnerId) ?? { wins: 0, frauds: 0, lastWinRound: -1, recent: [] };
         stats.wins += 1;
         stats.lastWinRound = this.round;
-        if (realGlobalDelta > 1e-4 && this.bestProposal.delta < -1e-4) stats.frauds += 1;
+        const isFraud = realGlobalDelta > 1e-4 && this.bestProposal.delta < -1e-4;
+        if (isFraud) stats.frauds += 1;
+        stats.recent.push(isFraud ? 1 : 0);
+        if (stats.recent.length > 20) stats.recent.shift();
         this.workerStats.set(winnerId, stats);
       }
       this.history.push({ round: this.round, loss: this.lastLoss, accepted: !!apply, delta: appliedDelta, ts: Date.now() });
