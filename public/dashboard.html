@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Postnet × Cloudflare — substrate dashboard</title>
+  <style>
+    :root {
+      --ink: #1a1a1a;
+      --paper: #fafaf7;
+      --rule: #d4d2cc;
+      --accent: #d6502c;
+      --c-adam: #d6502c;
+      --c-tourn: #2c8a4f;
+      --c-tern: #6a4cb0;
+      --c-lm: #0e6e8c;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", system-ui, sans-serif;
+      max-width: 1280px;
+      margin: 32px auto;
+      padding: 0 24px;
+      color: var(--ink);
+      background: var(--paper);
+      line-height: 1.5;
+    }
+    h1 { font-weight: 700; margin: 0 0 4px; letter-spacing: -0.02em; }
+    .sub { color: #666; margin: 0 0 28px; font-size: 14px; }
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+    .card {
+      border: 1px solid var(--rule);
+      border-radius: 8px;
+      padding: 14px 16px;
+      background: #fff;
+    }
+    .card h3 {
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      margin: 0 0 8px;
+    }
+    .card.adam h3   { color: var(--c-adam); }
+    .card.tourn h3  { color: var(--c-tourn); }
+    .card.tern h3   { color: var(--c-tern); }
+    .card.lm h3     { color: var(--c-lm); }
+    .card a { color: inherit; text-decoration: none; font-size: 11px; float: right; opacity: 0.7; }
+    .card a:hover { text-decoration: underline; }
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 6px 14px;
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+      margin: 8px 0;
+    }
+    .stats label { color: #666; }
+    .stats b { font-weight: 600; }
+    canvas {
+      width: 100%;
+      height: 130px;
+      border: 1px solid var(--rule);
+      border-radius: 5px;
+      background: #fff;
+      display: block;
+    }
+    .sample {
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 11px;
+      padding: 8px;
+      margin-top: 8px;
+      background: #fcfaf3;
+      border: 1px solid var(--rule);
+      border-radius: 4px;
+      min-height: 36px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .footer {
+      margin-top: 24px;
+      font-size: 12px;
+      color: #888;
+      text-align: center;
+    }
+    .badge {
+      display: inline-block;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      padding: 2px 6px;
+      border-radius: 3px;
+      margin-left: 8px;
+    }
+    .badge.idle { background: #efece4; color: #888; }
+    .badge.live { background: #d4f0db; color: #2c8a4f; }
+  </style>
+</head>
+<body>
+  <h1>Postnet × Cloudflare — substrate dashboard</h1>
+  <p class="sub">Four demos, one substrate. Each card polls its DO every 2 s and shows the live loss curve, peers, and (where applicable) a model sample. All four use the same Cloudflare Worker + Durable Object + R2 stack — only the optimizer / model shape differs.</p>
+
+  <div class="grid">
+    <div class="card adam">
+      <h3>federated Adam <span id="adam-badge" class="badge idle">idle</span><a href="/">open →</a></h3>
+      <div class="stats">
+        <div><label>round</label> <b id="adam-round">—</b></div>
+        <div><label>peers</label> <b id="adam-peers">—</b></div>
+        <div><label>loss</label> <b id="adam-loss">—</b></div>
+        <div><label>task</label> <b id="adam-task">—</b></div>
+      </div>
+      <canvas id="adam-chart"></canvas>
+    </div>
+
+    <div class="card tourn">
+      <h3>float tournament (phase 1-3) <span id="tourn-badge" class="badge idle">idle</span><a href="/tournament.html">open →</a></h3>
+      <div class="stats">
+        <div><label>round</label> <b id="tourn-round">—</b></div>
+        <div><label>peers</label> <b id="tourn-peers">—</b></div>
+        <div><label>loss</label> <b id="tourn-loss">—</b></div>
+        <div><label>accept</label> <b id="tourn-ar">—</b></div>
+      </div>
+      <canvas id="tourn-chart"></canvas>
+    </div>
+
+    <div class="card tern">
+      <h3>ternary tournament (phase 4) <span id="tern-badge" class="badge idle">idle</span><a href="/ternary.html">open →</a></h3>
+      <div class="stats">
+        <div><label>round</label> <b id="tern-round">—</b></div>
+        <div><label>peers</label> <b id="tern-peers">—</b></div>
+        <div><label>loss</label> <b id="tern-loss">—</b></div>
+        <div><label>accept</label> <b id="tern-ar">—</b></div>
+      </div>
+      <canvas id="tern-chart"></canvas>
+    </div>
+
+    <div class="card lm">
+      <h3>char-LM (phase 5-10) <span id="lm-badge" class="badge idle">idle</span><a href="/lm.html">open →</a></h3>
+      <div class="stats">
+        <div><label>round</label> <b id="lm-round">—</b></div>
+        <div><label>peers</label> <b id="lm-peers">—</b></div>
+        <div><label>loss</label> <b id="lm-loss">—</b></div>
+        <div><label>accept</label> <b id="lm-ar">—</b></div>
+      </div>
+      <canvas id="lm-chart"></canvas>
+      <div class="sample" id="lm-sample">(no sample yet)</div>
+    </div>
+  </div>
+
+  <p class="footer">
+    All four demos can run simultaneously — they're independent Durable Objects.
+    Convergence curves above are independent processes; comparable but not coupled.
+    Source: <a href="https://github.com/abgnydn/postnet-cf" style="color:#666;">github.com/abgnydn/postnet-cf</a>
+  </p>
+
+  <script>
+    const cards = [
+      { id: "adam",  url: "/api/state",            taskField: "task",  hasArField: false, hasSample: false },
+      { id: "tourn", url: "/api/tournament/state", taskField: "task",  hasArField: true,  hasSample: false },
+      { id: "tern",  url: "/api/ternary/state",    taskField: "task",  hasArField: true,  hasSample: false },
+      { id: "lm",    url: "/api/lm/state",         taskField: null,    hasArField: true,  hasSample: true  },
+    ];
+
+    function drawChart(canvas, history, color) {
+      const ctx = canvas.getContext("2d");
+      ctx.canvas.width = canvas.clientWidth * devicePixelRatio;
+      ctx.canvas.height = canvas.clientHeight * devicePixelRatio;
+      ctx.scale(devicePixelRatio, devicePixelRatio);
+      const w = canvas.clientWidth, h = canvas.clientHeight;
+      ctx.clearRect(0, 0, w, h);
+      if (!history || history.length < 2) return;
+      const losses = history.map(p => p.loss).filter(x => x >= 0);
+      if (losses.length < 2) return;
+      const lo = Math.min(...losses), hi = Math.max(...losses);
+      const range = Math.max(hi - lo, 0.001);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.8;
+      ctx.beginPath();
+      for (let i = 0; i < history.length; i++) {
+        const x = (i / Math.max(history.length - 1, 1)) * w;
+        const y = h - 6 - ((history[i].loss - lo) / range) * (h - 12);
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+      ctx.fillStyle = "#aaa";
+      ctx.font = "10px ui-monospace, monospace";
+      ctx.fillText(hi.toFixed(2), 2, 10);
+      ctx.fillText(lo.toFixed(2), 2, h - 2);
+    }
+
+    async function poll(card) {
+      const $ = (suffix) => document.getElementById(`${card.id}-${suffix}`);
+      try {
+        const r = await fetch(card.url);
+        const s = await r.json();
+        $("round").textContent = s.round;
+        $("peers").textContent = (s.joined || []).length;
+        $("loss").textContent = (typeof s.last_loss === "number") ? s.last_loss.toFixed(4) : "—";
+        if (card.taskField && s[card.taskField]) {
+          const taskEl = $("task"); if (taskEl) taskEl.textContent = s[card.taskField];
+        }
+        if (card.hasArField) {
+          const arEl = $("ar"); if (arEl) arEl.textContent = ((s.accept_rate || 0) * 100).toFixed(0) + "%";
+        }
+        const peers = (s.joined || []).length;
+        $("badge").textContent = peers > 0 ? "live" : "idle";
+        $("badge").className = "badge " + (peers > 0 ? "live" : "idle");
+        const color = getComputedStyle(document.documentElement).getPropertyValue(`--c-${card.id}`).trim();
+        drawChart($("chart"), s.history || [], color);
+        if (card.hasSample && s.sample) {
+          $("sample").textContent = s.sample.slice(0, 200);
+        }
+      } catch (e) {
+        $("badge").textContent = "down";
+        $("badge").className = "badge idle";
+      }
+    }
+
+    function pollAll() { for (const c of cards) poll(c); }
+    pollAll();
+    setInterval(pollAll, 2000);
+  </script>
+</body>
+</html>
