@@ -211,6 +211,22 @@ Headless verifier (`scripts/lm-verifier.mjs`, 3 workers × 1500 rounds):
 
 Loss drops monotonically from 3.29 → 1.67 driven entirely by federated flip-and-accept on a real ML loss surface (no gradients, no autograd). The mode collapse to "the the the…" is expected for a 1-char-context bigram — it has no notion that it just emitted the same word three times. Phase 6 (BitNet b1.58 via fused-lora) brings real context length and breaks out of the mode-collapse regime; the protocol stays the same.
 
+### Phase 6 — sharded snapshots (parallel bootstrap)
+
+`/api/lm/snapshot` now returns a **manifest** listing N shards instead of a single binary URL. Each shard is its own R2 key (`lm/r{N}/shard{K}.bin`); workers fetch them all in parallel via `Promise.all` and assemble the local θ. The first shard carries the 8-byte `[round, P]` header; subsequent shards are raw `float32` payloads.
+
+```bash
+$ curl -s localhost:8787/api/lm/snapshot | jq '.num_shards, .shards | length'
+4
+4
+```
+
+At P = 891 with `SHARD_SIZE = 1 KB` the snapshot splits into 4 shards (256 + 256 + 256 + 123 floats). Reassembly in the worker via parallel fetch + sorted `Float32Array.set()`. Bootstrap latency is now bound by the slowest single shard, not the total bytes.
+
+The point: the Cloudflare Worker response cap is 100 MB. At BitNet 2B scale (~282 MB ternary) a single-shot snapshot fetch is impossible — the bootstrap *must* be sharded. Production sharding would use `SHARD_SIZE ≈ 64 MB` for BitNet (∼5 shards × 64 MB), keeping each below the cap while parallelizing the wall-clock. The demo uses tiny 1 KB shards purely to exercise the assembly logic at small P.
+
+Response headers `x-snapshot-shard: K` and `x-snapshot-source: r2 | memory` make it easy to verify the right shard was returned from the right path.
+
 ## Open questions / future moves
 
 - **Real workload.** Swap the synthetic 2D classifier for `fusedx`'s `gpt-gradfree-engine.ts` or a TF.js MNIST model. Same coord, real ML compute.

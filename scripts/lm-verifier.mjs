@@ -102,15 +102,26 @@ class Worker {
     return JSON.parse(text);
   }
   async bootstrap() {
+    // Phase 6: parallel shard fetch
     const meta = await this.fetchJson(`${COORD}/api/lm/snapshot`);
-    const r = await fetch(`${COORD}${meta.snapshot_url}`);
-    const buf = await r.arrayBuffer();
-    this.bytesDown += buf.byteLength;
-    const view = new DataView(buf);
-    const round = view.getUint32(0, true);
-    const p = view.getUint32(4, true);
+    if (!Array.isArray(meta.shards)) throw new Error("no shards");
+    const buffers = await Promise.all(meta.shards.map(async s => {
+      const r = await fetch(`${COORD}${s.url}`);
+      const buf = await r.arrayBuffer();
+      this.bytesDown += buf.byteLength;
+      return { shard: s.shard, headerSize: s.shard === 0 ? 8 : 0, buf };
+    }));
+    buffers.sort((a, b) => a.shard - b.shard);
+    const headView = new DataView(buffers[0].buf);
+    const round = headView.getUint32(0, true);
+    const p = headView.getUint32(4, true);
     if (p !== P) throw new Error(`P mismatch: server=${p} client=${P}`);
-    this.localTheta = new Float32Array(buf.slice(8));
+    this.localTheta = new Float32Array(P);
+    for (const b of buffers) {
+      const start = b.shard * (meta.shard_size_floats || (b.buf.byteLength - b.headerSize) / 4);
+      const floats = new Float32Array(b.buf, b.headerSize);
+      this.localTheta.set(floats, start);
+    }
     this.localRound = round;
   }
   async tick(round, indices, values, delta) {

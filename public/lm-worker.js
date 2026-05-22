@@ -145,18 +145,35 @@ async function trackedFetch(url, init) {
 }
 
 async function bootstrap() {
+  // Phase 6: snapshot is sharded. Manifest lists N shards; we fetch all in parallel.
+  const t0 = performance.now();
   const meta = await trackedFetch("/api/lm/snapshot");
-  const r = await fetch(meta.snapshot_url);
-  const buf = await r.arrayBuffer();
-  bytesDown += buf.byteLength;
+  if (!Array.isArray(meta.shards)) throw new Error("no shards in manifest");
+  const buffers = await Promise.all(meta.shards.map(async s => {
+    const r = await fetch(s.url);
+    if (!r.ok) throw new Error(`shard${s.shard} ${r.status}`);
+    const buf = await r.arrayBuffer();
+    bytesDown += buf.byteLength;
+    return { shard: s.shard, headerSize: s.shard === 0 ? 8 : 0, buf };
+  }));
   updateBwStat();
-  const view = new DataView(buf);
-  const round = view.getUint32(0, true);
-  const p = view.getUint32(4, true);
+  buffers.sort((a, b) => a.shard - b.shard);
+  // First shard carries header; the rest are raw floats
+  const head = buffers[0];
+  const headView = new DataView(head.buf);
+  const round = headView.getUint32(0, true);
+  const p = headView.getUint32(4, true);
   if (p !== P) throw new Error(`P mismatch: server=${p} client=${P}`);
-  localTheta = new Float32Array(buf.slice(8));
+  localTheta = new Float32Array(P);
+  for (const b of buffers) {
+    const start = b.shard * (meta.shard_size_floats || (b.buf.byteLength - b.headerSize) / 4);
+    const floats = new Float32Array(b.buf, b.headerSize);
+    localTheta.set(floats, start);
+  }
   localRound = round;
-  log(`bootstrap @ R${round} (${buf.byteLength} B)`);
+  const ms = (performance.now() - t0).toFixed(0);
+  const totalBytes = buffers.reduce((a, b) => a + b.buf.byteLength, 0);
+  log(`bootstrap @ R${round} via ${buffers.length} shards · ${totalBytes} B · ${ms}ms`);
   return meta;
 }
 

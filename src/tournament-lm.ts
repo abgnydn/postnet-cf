@@ -35,6 +35,13 @@ const FLIP_SIZE = 6;
 const FLIP_SIGMA = 0.15;
 const SNAPSHOT_EVERY = 50;
 const SNAPSHOT_KEY_PREFIX = "lm/";
+// Phase 6: sharded snapshots. Cloudflare Worker response cap is 100 MB —
+// at BitNet 2B scale (~282 MB) the bootstrap must be split across multiple
+// R2 keys and fetched in parallel. SHARD_SIZE = 1 KB here so even the
+// 891-param demo splits into 4 shards and exercises the parallel path.
+// In production with BitNet 2B you'd use SHARD_SIZE ≈ 64 MB → ~5 shards.
+const SHARD_SIZE = 1024;
+const FLOATS_PER_SHARD = SHARD_SIZE / 4;
 
 // Toy training text — short enough to score quickly, long enough to have
 // learnable bigram/trigram structure. ~340 chars.
@@ -120,7 +127,7 @@ export class TournamentLM extends DurableObject<Env> {
   private history: { round: number; loss: number; accepted: boolean; delta: number; ts: number }[] = [];
   private appliedHistory: AppliedFlip[] = [];
   private snapshotRound = 0;
-  private snapshotKey = "";
+  private snapshotShards: string[] = [];   // R2 keys, one per shard
   private bornAt = Date.now();
 
   constructor(state: DurableObjectState, env: Env) {
@@ -134,19 +141,41 @@ export class TournamentLM extends DurableObject<Env> {
   }
 
   private async publishSnapshot(): Promise<void> {
-    const key = `${SNAPSHOT_KEY_PREFIX}r${this.round}.bin`;
-    const buf = new ArrayBuffer(8 + P * 4);
-    const view = new DataView(buf);
-    view.setUint32(0, this.round, true);
-    view.setUint32(4, P, true);
-    new Float32Array(buf, 8).set(this.theta);
-    try {
-      await this.env.SNAPSHOTS.put(key, buf, {
+    // Phase 6: shard θ into SHARD_SIZE chunks, one R2 key per shard.
+    // First shard carries an 8-byte header [round, P]; subsequent shards
+    // are raw float32 contiguous slices. Workers fetch all shards in parallel.
+    const numShards = Math.ceil(P / FLOATS_PER_SHARD);
+    const shardKeys: string[] = [];
+    const puts: Promise<unknown>[] = [];
+    for (let k = 0; k < numShards; k++) {
+      const floatStart = k * FLOATS_PER_SHARD;
+      const floatEnd = Math.min(floatStart + FLOATS_PER_SHARD, P);
+      const floatCount = floatEnd - floatStart;
+      const headerSize = k === 0 ? 8 : 0;
+      const buf = new ArrayBuffer(headerSize + floatCount * 4);
+      const view = new DataView(buf);
+      if (k === 0) {
+        view.setUint32(0, this.round, true);
+        view.setUint32(4, P, true);
+      }
+      new Float32Array(buf, headerSize, floatCount).set(this.theta.subarray(floatStart, floatEnd));
+      const key = `${SNAPSHOT_KEY_PREFIX}r${this.round}/shard${k}.bin`;
+      shardKeys.push(key);
+      puts.push(this.env.SNAPSHOTS.put(key, buf, {
         httpMetadata: { contentType: "application/octet-stream" },
-        customMetadata: { round: String(this.round), p: String(P), kind: "lm" },
-      });
+        customMetadata: {
+          round: String(this.round),
+          p: String(P),
+          shard: String(k),
+          total_shards: String(numShards),
+          kind: "lm",
+        },
+      }).catch(() => {}));
+    }
+    try {
+      await Promise.all(puts);
       this.snapshotRound = this.round;
-      this.snapshotKey = key;
+      this.snapshotShards = shardKeys;
     } catch {}
   }
 
@@ -160,37 +189,69 @@ export class TournamentLM extends DurableObject<Env> {
       return Response.json({ sample: this.sampleText(seedChar, n) });
     }
     if (url.pathname === "/api/lm/snapshot") {
+      // Phase 6: return a shard manifest. Worker fetches all shards in parallel.
+      const round = this.snapshotRound || this.round;
+      const numShards = Math.ceil(P / FLOATS_PER_SHARD);
+      const shards = [];
+      for (let k = 0; k < numShards; k++) {
+        const floatStart = k * FLOATS_PER_SHARD;
+        const floatEnd = Math.min(floatStart + FLOATS_PER_SHARD, P);
+        const floatCount = floatEnd - floatStart;
+        const headerSize = k === 0 ? 8 : 0;
+        shards.push({
+          url: `/api/lm/snapshot.bin?round=${round}&shard=${k}`,
+          shard: k,
+          float_start: floatStart,
+          float_count: floatCount,
+          bytes: headerSize + floatCount * 4,
+        });
+      }
       return Response.json({
-        round: this.snapshotRound || this.round,
-        P,
-        V, E,
-        snapshot_url: `/api/lm/snapshot.bin?round=${this.snapshotRound || this.round}`,
-        snapshot_bytes: 8 + P * 4,
+        round, P, V, E,
+        num_shards: numShards,
+        shard_size_floats: FLOATS_PER_SHARD,
+        shards,
+        snapshot_bytes_total: 8 + P * 4,
       });
     }
     if (url.pathname === "/api/lm/snapshot.bin") {
       const wantRound = parseInt(url.searchParams.get("round") || "-1");
-      if (this.snapshotKey && (wantRound < 0 || wantRound === this.snapshotRound)) {
-        const obj = await this.env.SNAPSHOTS.get(this.snapshotKey);
+      const wantShard = parseInt(url.searchParams.get("shard") || "0");
+      // Try R2 first
+      if (this.snapshotShards.length > 0
+          && (wantRound < 0 || wantRound === this.snapshotRound)
+          && wantShard >= 0 && wantShard < this.snapshotShards.length) {
+        const obj = await this.env.SNAPSHOTS.get(this.snapshotShards[wantShard]);
         if (obj) {
           return new Response(obj.body, {
             headers: {
               "content-type": "application/octet-stream",
               "x-snapshot-round": String(this.snapshotRound),
+              "x-snapshot-shard": String(wantShard),
               "x-snapshot-source": "r2",
             },
           });
         }
       }
-      const buf = new ArrayBuffer(8 + P * 4);
+      // In-memory fallback for the requested shard
+      const numShards = Math.ceil(P / FLOATS_PER_SHARD);
+      const shardIdx = Math.max(0, Math.min(wantShard, numShards - 1));
+      const floatStart = shardIdx * FLOATS_PER_SHARD;
+      const floatEnd = Math.min(floatStart + FLOATS_PER_SHARD, P);
+      const floatCount = floatEnd - floatStart;
+      const headerSize = shardIdx === 0 ? 8 : 0;
+      const buf = new ArrayBuffer(headerSize + floatCount * 4);
       const view = new DataView(buf);
-      view.setUint32(0, this.round, true);
-      view.setUint32(4, P, true);
-      new Float32Array(buf, 8).set(this.theta);
+      if (shardIdx === 0) {
+        view.setUint32(0, this.round, true);
+        view.setUint32(4, P, true);
+      }
+      new Float32Array(buf, headerSize, floatCount).set(this.theta.subarray(floatStart, floatEnd));
       return new Response(buf, {
         headers: {
           "content-type": "application/octet-stream",
           "x-snapshot-round": String(this.round),
+          "x-snapshot-shard": String(shardIdx),
           "x-snapshot-source": "memory",
         },
       });
@@ -215,7 +276,7 @@ export class TournamentLM extends DurableObject<Env> {
     this.history = [];
     this.appliedHistory = [];
     this.snapshotRound = 0;
-    this.snapshotKey = "";
+    this.snapshotShards = [];
     this.lastLoss = testLoss(this.theta);
     this.history.push({ round: -1, loss: this.lastLoss, accepted: false, delta: 0, ts: Date.now() });
     await this.publishSnapshot();
