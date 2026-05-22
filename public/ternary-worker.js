@@ -119,6 +119,9 @@ let history = [];
 let currentTask = "wave";
 let localSign = null;
 let localScale = 0.5;
+// Phase 18: WS push
+let ws = null;
+let wsConnected = false;
 let localRound = -1;
 let bytesUp = 0, bytesDown = 0;
 
@@ -314,13 +317,42 @@ async function pullState() {
   } catch (e) {}
 }
 
+function openWebSocket() {
+  try {
+    const proto = location.protocol === "https:" ? "wss:" : "ws:";
+    ws = new WebSocket(`${proto}//${location.host}/api/ternary/ws`);
+    ws.addEventListener("open", () => { wsConnected = true; log("ws connected"); });
+    ws.addEventListener("message", (e) => {
+      bytesDown += e.data.length;
+      updateBwStat();
+      try {
+        const m = JSON.parse(e.data);
+        if (m.type === "advance" && localSign) {
+          if (m.applied && m.applied.round === localRound) applyDelta(m.applied);
+          localRound = m.round;
+        } else if (m.type === "hello" && localSign && Array.isArray(m.recent)) {
+          for (const flip of m.recent) {
+            if (flip.round >= localRound) applyDelta(flip);
+          }
+          localRound = m.round;
+        }
+      } catch {}
+    });
+    ws.addEventListener("close", () => { wsConnected = false; });
+    ws.addEventListener("error", () => { wsConnected = false; });
+  } catch {}
+}
+
 async function runForever() {
   await bootstrap();
+  openWebSocket();
   while (running) {
     try {
-      const pulled = await tickPoll();
-      updateStats(pulled);
-      await reconcile(pulled);
+      if (!wsConnected) {
+        const pulled = await tickPoll();
+        updateStats(pulled);
+        await reconcile(pulled);
+      }
       renderBoundary(localSign, localScale);
 
       const seed = ((localRound + 1) * 1000003) ^

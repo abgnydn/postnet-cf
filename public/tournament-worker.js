@@ -122,6 +122,9 @@ let currentTask = "wave";
 let localTheta = null;
 let localRound = -1;
 let bytesUp = 0;
+// Phase 18: WS push (server-side pushes already wired in Phase 16)
+let ws = null;
+let wsConnected = false;
 let bytesDown = 0;
 let bootstrapCount = 0;
 
@@ -328,14 +331,43 @@ async function pullState() {
   } catch (e) {}
 }
 
+function openWebSocket() {
+  try {
+    const proto = location.protocol === "https:" ? "wss:" : "ws:";
+    ws = new WebSocket(`${proto}//${location.host}/api/tournament/ws`);
+    ws.addEventListener("open", () => { wsConnected = true; log("ws connected"); });
+    ws.addEventListener("message", (e) => {
+      bytesDown += e.data.length;
+      updateBwStat();
+      try {
+        const m = JSON.parse(e.data);
+        if (m.type === "advance" && localTheta) {
+          if (m.applied && m.applied.round === localRound) applyDelta(m.applied);
+          localRound = m.round;
+        } else if (m.type === "hello" && localTheta && Array.isArray(m.recent)) {
+          for (const flip of m.recent) {
+            if (flip.round >= localRound) applyDelta(flip);
+          }
+          localRound = m.round;
+        }
+      } catch {}
+    });
+    ws.addEventListener("close", () => { wsConnected = false; });
+    ws.addEventListener("error", () => { wsConnected = false; });
+  } catch {}
+}
+
 async function runForever() {
   await bootstrap();
+  openWebSocket();
   while (running) {
     try {
-      // Pull state for this round (no proposal — just sync)
-      const pulled = await tickPoll();
-      updateStats(pulled);
-      await reconcile(pulled);
+      // Phase 18: skip explicit poll when WS pushes are flowing
+      if (!wsConnected) {
+        const pulled = await tickPoll();
+        updateStats(pulled);
+        await reconcile(pulled);
+      }
       renderBoundary(localTheta);
 
       // Generate K proposals on localTheta
