@@ -103,30 +103,56 @@ Browser-side constants in `public/worker.js`:
 - `BATCH_SIZE = 64` — synthetic samples per local gradient
 - `POLL_DELAY_MS = 80` — pause between worker tick loops
 
-## Phase 1 — tournament protocol (fusedx integration)
+## Tournament protocol (fusedx integration)
 
 The same task with a different aggregation shape: instead of every worker sending a gradient and the coord averaging them, every worker locally tries `K = 8` random flips of `4` parameters, scores each on its private batch, and submits just its **single best** `(indices, values, Δloss)`. The coord picks the best across all workers in the round and applies it.
 
-| protocol | uplink per worker per round | model-size dependent? |
-|---|---|---|
-| federated Adam (this repo, `/`) | 4·P bytes ≈ 520 B | yes |
-| tournament (this repo, `/tournament.html`) | `flip_size · 8 + 4` ≈ 36 B | **no** |
-
-Headless verifier results across 3 workers × 400 rounds:
-
-| task | tournament final loss | federated-Adam final loss | accept rate |
-|---|---|---|---|
-| circle | 0.07 ✓ | 0.07 ✓ | ~49% |
-| xor | 0.07 ✓ | 0.04 ✓ | ~49% |
-| wave | 0.21 △ | 0.10 ✓ | ~49% |
-
-Tournament converges on circle/xor at parity; the wave task is slower under flip-and-accept (no gradient signal — pure guess-and-check). That's expected. The point of Phase 1 is the **protocol shape**, not the optimizer's competitiveness on a 129-param toy. Phases 2/3 swap in delta-only θ broadcasts via R2 and a real BitNet model — at which point the constant-bandwidth uplink starts to matter.
+UI at `/tournament.html`. Same task selector, same boundary canvas; new stats for accept rate and live bandwidth, plus green ticks on the chart marking applied rounds.
 
 ```bash
 node scripts/tournament-verifier.mjs   # smoke-test the protocol
 ```
 
-UI is at `/tournament.html`. Same task selector, same boundary canvas, plus an accept-rate stat and green ticks on the chart marking applied rounds.
+### Phase 1 — flip-and-accept tournament
+
+Per-worker per-round payload at P = 129:
+
+| protocol | up | down |
+|---|---|---|
+| federated Adam | ~530 B (gradient) | ~530 B (full θ) |
+| Phase 1 tournament | ~36 B (flip) | ~530 B (full θ) |
+
+Headless verifier (3 workers × 400 rounds): circle 0.07 ✓ · xor 0.07 ✓ · wave 0.21 △
+
+### Phase 2 — delta-only broadcasts
+
+Workers bootstrap θ once via `/api/tournament/snapshot`, then maintain `localTheta` by applying each tick response's `applied_since` (the list of flips applied since the worker's last sync). The coord no longer ships full θ in tick responses.
+
+Per-worker per-round payload at P = 129 (this demo):
+
+| protocol | up | down | scales with P? |
+|---|---|---|---|
+| federated Adam | 4·P + ~70 B | 4·P + ~70 B | **yes** (both) |
+| Phase 1 tournament | flip + ~50 B | 4·P + ~70 B | down only |
+| Phase 2 tournament | flip + since + ~30 B | ~N_flips·40 + ~80 B | **no** (after bootstrap) |
+
+Per-worker per-round measured by the headless verifier:
+
+| protocol | up | down |
+|---|---|---|
+| Phase 1 tournament | ~120 B | ~470 B (theta dominates) |
+| Phase 2 tournament | ~235 B (includes since_round + ack) | ~680 B (JSON-heavy on this tiny model) |
+
+At P = 129 Phase 2 is *not* a bandwidth win — JSON envelope overhead dominates. The point is the **scaling**:
+
+|   | downlink at P = 129 | downlink at P = 1M | downlink at P = 500M (BitNet 2B) |
+|---|---|---|---|
+| federated Adam / Phase 1 | ~520 B | ~4 MB | ~2 GB (exceeds Worker response cap) |
+| Phase 2 | ~680 B | ~680 B | ~680 B |
+
+Convergence is unchanged (3 workers × 400 rounds): circle 0.10 ✓ · xor 0.08 ✓ · wave 0.23 △.
+
+Drift handling: each worker sends its `localRound` as `since_round`. Server returns every applied flip with `round >= since_round`. If the coord's `appliedHistory` has been truncated past the worker's last sync (cap 1000), the worker detects via `oldest_applied_round > localRound + 1` and re-bootstraps via `/snapshot`. In Phase 3 the snapshot moves to R2 with a versioned URL.
 
 ## Open questions / future moves
 

@@ -1,23 +1,24 @@
 /**
- * Browser worker — tournament / flip-and-accept protocol.
+ * Browser worker — Phase 2 tournament protocol.
+ *
+ * Key difference from Phase 1: the coord no longer ships full θ on every
+ * tick. Each worker bootstraps θ once via /api/tournament/snapshot, then
+ * applies the accepted flip carried in each tick response to keep its
+ * localTheta in sync. Downlink per round drops from ~520 B to ~36 B.
  *
  * For each round:
- *   1. Pull θ from coord (and active task)
- *   2. Generate K random flip proposals locally
- *      A flip = perturb FLIP_SIZE random params by Gaussian noise (σ=0.15)
- *      Score each proposal by mean BCE loss on a private batch
- *      Keep the single best (lowest loss)
- *   3. POST best to coord as {indices, values, delta_loss}
- *   4. Coord picks best across all workers in the round, applies, broadcasts.
- *
- * Bandwidth: ~FLIP_SIZE × 8 bytes ≈ 32 B uplink (model-size independent).
- * Downlink: still full θ (Phase 2 ships delta-only).
+ *   1. Poll /api/tournament/tick (just to sync state — no proposal yet)
+ *   2. Reconcile: apply last_applied if we trail by exactly 1 round;
+ *      re-bootstrap if we trail by more
+ *   3. Generate K=8 random flip proposals locally on localTheta
+ *   4. Submit best proposal
+ *   5. Reconcile again with the response
  */
 
 const H = 32;
 const P = 4 * H + 1;
-const BATCH_SIZE = 128;     // larger batch → less noisy delta scoring
-const TRIALS_PER_REPORT = 8; // K = local proposals before submitting best
+const BATCH_SIZE = 128;
+const TRIALS_PER_REPORT = 8;
 const FLIP_SIZE = 4;
 const FLIP_SIGMA = 0.15;
 const POLL_DELAY_MS = 60;
@@ -34,7 +35,6 @@ function mulberry32(seed) {
 }
 
 function gaussian(rng) {
-  // Box-Muller
   let u = 0, v = 0;
   while (u === 0) u = rng();
   while (v === 0) v = rng();
@@ -85,7 +85,6 @@ function batchLoss(theta, batch) {
 }
 
 function proposeFlip(theta, rng) {
-  // Pick FLIP_SIZE unique indices, perturb each by Gaussian
   const indices = new Int32Array(FLIP_SIZE);
   const values = new Float32Array(FLIP_SIZE);
   const seen = new Set();
@@ -103,7 +102,8 @@ function proposeFlip(theta, rng) {
 const workerId = `t-${Math.random().toString(36).slice(2, 8)}`;
 const $ = (id) => document.getElementById(id);
 const widEl = $("wid"), roundEl = $("round"), poolEl = $("pool");
-const peersEl = $("peers"), lossEl = $("loss"), arEl = $("ar"), logEl = $("log");
+const peersEl = $("peers"), lossEl = $("loss"), arEl = $("ar");
+const bwEl = $("bw"), logEl = $("log");
 const joinBtn = $("join"), resetBtn = $("reset");
 const taskSel = $("task");
 const chartCanvas = $("chart");
@@ -118,9 +118,108 @@ let running = false;
 let history = [];
 let currentTask = "wave";
 
+// Phase 2 state
+let localTheta = null;
+let localRound = -1;
+let bytesUp = 0;
+let bytesDown = 0;
+let bootstrapCount = 0;
+
 function log(s) {
   const stamp = new Date().toLocaleTimeString();
   logEl.textContent = `[${stamp}] ${s}\n` + logEl.textContent.slice(0, 4000);
+}
+
+function fmtBytes(n) {
+  if (n < 1024) return n + " B";
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+  return (n / 1024 / 1024).toFixed(2) + " MB";
+}
+
+function updateBwStat() {
+  if (bwEl) {
+    bwEl.textContent = `↑${fmtBytes(bytesUp)} ↓${fmtBytes(bytesDown)}`;
+  }
+}
+
+async function trackedFetch(url, init) {
+  const body = init && init.body ? init.body : "";
+  bytesUp += new TextEncoder().encode(body).length;
+  const r = await fetch(url, init);
+  const text = await r.text();
+  bytesDown += new TextEncoder().encode(text).length;
+  updateBwStat();
+  if (!r.ok) throw new Error(`coord ${r.status}: ${text.slice(0, 100)}`);
+  return JSON.parse(text);
+}
+
+async function bootstrap() {
+  const s = await trackedFetch("/api/tournament/snapshot");
+  localTheta = new Float32Array(s.theta);
+  localRound = s.round;
+  currentTask = s.task || "wave";
+  bootstrapCount += 1;
+  log(`bootstrap @ R${s.round} (${(s.theta.length * 4)} B)`);
+  return s;
+}
+
+async function tickPoll() {
+  return await trackedFetch("/api/tournament/tick", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ worker_id: workerId, since_round: localRound }),
+  });
+}
+
+async function submitBest(round, indices, values, delta) {
+  return await trackedFetch("/api/tournament/tick", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      worker_id: workerId,
+      round,
+      indices: Array.from(indices),
+      values: Array.from(values),
+      delta,
+      since_round: localRound,
+    }),
+  });
+}
+
+function applyDelta(applied) {
+  for (let k = 0; k < applied.indices.length; k++) {
+    const idx = applied.indices[k];
+    if (idx >= 0 && idx < P) localTheta[idx] = applied.values[k];
+  }
+}
+
+async function reconcile(resp) {
+  currentTask = resp.task || currentTask;
+  if (taskSel && taskSel.value !== currentTask) taskSel.value = currentTask;
+  if (resp.round === localRound) return;
+  // If server has truncated history past our last sync point, we must re-snapshot.
+  if (typeof resp.oldest_applied_round === "number"
+      && resp.oldest_applied_round > localRound + 1) {
+    log(`history truncated (oldest=${resp.oldest_applied_round}, local=${localRound}) — re-bootstrapping`);
+    await bootstrap();
+    return;
+  }
+  if (Array.isArray(resp.applied_since)) {
+    for (const flip of resp.applied_since) {
+      if (flip.round >= localRound) applyDelta(flip);
+    }
+  }
+  localRound = resp.round;
+}
+
+function updateStats(s) {
+  roundEl.textContent = s.round;
+  poolEl.textContent = `${s.proposals}/${s.target}`;
+  peersEl.textContent = s.joined;
+  lossEl.textContent = s.last_loss >= 0 ? s.last_loss.toFixed(4) : "—";
+  if (typeof s.accept_rate === "number") {
+    arEl.textContent = (s.accept_rate * 100).toFixed(1) + "%";
+  }
 }
 
 function drawChart() {
@@ -134,7 +233,6 @@ function drawChart() {
   ctx.strokeStyle = "#d4d2cc";
   ctx.lineWidth = 1;
   ctx.strokeRect(padX, padY, w - padX - 14, h - padY * 2);
-  // Loss line
   ctx.strokeStyle = "#d6502c";
   ctx.lineWidth = 2;
   ctx.beginPath();
@@ -145,7 +243,6 @@ function drawChart() {
     else ctx.lineTo(x, y);
   }
   ctx.stroke();
-  // Accept ticks along bottom
   ctx.fillStyle = "#2c8a4f";
   for (let i = 0; i < history.length; i++) {
     if (history[i].accepted) {
@@ -198,43 +295,9 @@ function renderBoundary(theta) {
   bctx.strokeRect(0, 0, BG, BG);
 }
 
-async function pull() {
-  const r = await fetch("/api/tournament/tick", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ worker_id: workerId }),
-  });
-  if (!r.ok) throw new Error(`coord ${r.status}`);
-  return await r.json();
-}
-
-async function submitBest(round, indices, values, delta) {
-  const r = await fetch("/api/tournament/tick", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      worker_id: workerId,
-      round,
-      indices: Array.from(indices),
-      values: Array.from(values),
-      delta,
-    }),
-  });
-  if (!r.ok) throw new Error(`coord ${r.status}`);
-  return await r.json();
-}
-
-function updateStats(s) {
-  roundEl.textContent = s.round;
-  poolEl.textContent = `${s.proposals}/${s.target}`;
-  peersEl.textContent = s.joined;
-  lossEl.textContent = s.last_loss >= 0 ? s.last_loss.toFixed(4) : "—";
-  if (typeof s.accept_rate === "number") {
-    arEl.textContent = (s.accept_rate * 100).toFixed(1) + "%";
-  }
-}
-
 async function pullState() {
+  // Lightweight summary fetch for the chart + boundary preview when idle.
+  // Still includes theta (only ~520 B and called every 5s).
   try {
     const r = await fetch("/api/tournament/state");
     const s = await r.json();
@@ -242,7 +305,8 @@ async function pullState() {
     currentTask = s.task || "wave";
     if (taskSel && taskSel.value !== currentTask) taskSel.value = currentTask;
     drawChart();
-    if (s.theta) renderBoundary(new Float32Array(s.theta));
+    if (!running && s.theta) renderBoundary(new Float32Array(s.theta));
+    if (running && localTheta) renderBoundary(localTheta);
     if (!running) {
       roundEl.textContent = s.round;
       poolEl.textContent = `${s.proposals}/${s.target}`;
@@ -254,29 +318,27 @@ async function pullState() {
 }
 
 async function runForever() {
+  await bootstrap();
   while (running) {
     try {
-      const pulled = await pull();
+      // Pull state for this round (no proposal — just sync)
+      const pulled = await tickPoll();
       updateStats(pulled);
-      currentTask = pulled.task || "wave";
-      if (taskSel && taskSel.value !== currentTask) taskSel.value = currentTask;
-      const theta = new Float32Array(pulled.theta);
-      const myRound = pulled.round;
-      renderBoundary(theta);
+      await reconcile(pulled);
+      renderBoundary(localTheta);
 
-      // Generate K=TRIALS_PER_REPORT proposals locally, keep best
-      const seed = ((myRound + 1) * 1000003) ^
+      // Generate K proposals on localTheta
+      const seed = ((localRound + 1) * 1000003) ^
                    (workerId.charCodeAt(0) * 31 + workerId.charCodeAt(2));
       const rng = mulberry32(seed);
       const batch = makeBatch(seed ^ 0xA17BEEF, BATCH_SIZE, currentTask);
-      const lossBefore = batchLoss(theta, batch);
+      const lossBefore = batchLoss(localTheta, batch);
 
       const trial = new Float32Array(P);
       let best = null;
       for (let t = 0; t < TRIALS_PER_REPORT; t++) {
-        const { indices, values } = proposeFlip(theta, rng);
-        // Apply flip into trial buffer
-        for (let i = 0; i < P; i++) trial[i] = theta[i];
+        const { indices, values } = proposeFlip(localTheta, rng);
+        for (let i = 0; i < P; i++) trial[i] = localTheta[i];
         for (let k = 0; k < indices.length; k++) trial[indices[k]] = values[k];
         const lossAfter = batchLoss(trial, batch);
         const delta = lossAfter - lossBefore;
@@ -285,15 +347,13 @@ async function runForever() {
         }
       }
 
-      const reported = await submitBest(myRound, best.indices, best.values, best.delta);
+      const reported = await submitBest(localRound, best.indices, best.values, best.delta);
       updateStats(reported);
+      await reconcile(reported);
       if (reported.advanced) {
-        log(`R${myRound} → R${reported.round} · best Δ ${best.delta.toFixed(4)} · loss ${reported.last_loss.toFixed(4)}`);
-        await pullState();
+        log(`R${localRound - 1} → R${localRound} · best Δ ${best.delta.toFixed(4)} · loss ${reported.last_loss.toFixed(4)} · ↑${fmtBytes(bytesUp)} ↓${fmtBytes(bytesDown)}`);
       } else if (reported.rejected) {
-        log(`R${myRound} stale — catching up to R${reported.round}`);
-      } else {
-        log(`R${myRound} submitted · best Δ ${best.delta.toFixed(4)} · waiting ${reported.proposals}/${reported.target}`);
+        log(`stale @ local R${localRound} — coord at R${reported.round}`);
       }
     } catch (e) {
       log(`error: ${e.message}`);
@@ -316,6 +376,11 @@ resetBtn.addEventListener("click", async () => {
   if (!confirm("Reset tournament coordinator? All progress lost.")) return;
   await fetch("/api/tournament/reset", { method: "POST" });
   history = [];
+  localTheta = null;
+  localRound = -1;
+  bytesUp = 0;
+  bytesDown = 0;
+  updateBwStat();
   drawChart();
   log("reset");
 });
@@ -333,6 +398,11 @@ if (taskSel) {
       body: JSON.stringify({ task: newTask }),
     });
     history = [];
+    localTheta = null;
+    localRound = -1;
+    bytesUp = 0;
+    bytesDown = 0;
+    updateBwStat();
     currentTask = newTask;
     log(`task → ${newTask}`);
     await pullState();

@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Postnet × Cloudflare — tournament protocol (Phase 1)</title>
+  <title>Postnet × Cloudflare — tournament (Phase 2)</title>
   <style>
     :root {
       --ink: #1a1a1a;
@@ -103,14 +103,17 @@
 </head>
 <body>
   <div class="nav"><a href="/">← federated Adam demo</a></div>
-  <span class="phase">Phase 1 · tournament protocol</span>
+  <span class="phase">Phase 2 · delta-only broadcast</span>
   <h1>Postnet × Cloudflare — tournament</h1>
   <p class="sub">
     Same 2D classifier task as the federated-Adam page, but a different
     aggregation protocol: each worker locally tries K random flips, submits its
     best <code>(indices, values, Δloss)</code>, and the coordinator picks the
-    single best across all workers in the round. ~32 B uplink per worker,
-    regardless of model size.
+    single best across all workers in the round.
+    Phase 2: workers bootstrap θ once via <code>/api/tournament/snapshot</code>
+    and maintain it locally. The coord ships only the accepted flip
+    (~36 B) per round — both uplink and downlink are now independent
+    of model size.
   </p>
 
   <div class="panel">
@@ -131,6 +134,7 @@
       <div class="stat"><label>peers</label><b id="peers">—</b></div>
       <div class="stat"><label>test loss</label><b id="loss">—</b></div>
       <div class="stat"><label>accept rate</label><b id="ar">—</b></div>
+      <div class="stat"><label>bandwidth</label><b id="bw">↑0 B ↓0 B</b></div>
     </div>
     <canvas id="chart" width="900" height="240"></canvas>
     <div class="boundary-wrap">

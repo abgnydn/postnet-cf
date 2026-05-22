@@ -83,6 +83,12 @@ interface Proposal {
   delta: number;
 }
 
+interface AppliedFlip {
+  round: number;
+  indices: number[];
+  values: number[];
+}
+
 export class Tournament extends DurableObject<Env> {
   private round = 0;
   private task: Task = "wave";
@@ -94,6 +100,7 @@ export class Tournament extends DurableObject<Env> {
   private accepted = 0;        // count of proposals actually applied
   private considered = 0;      // count of proposals received total
   private history: { round: number; loss: number; accepted: boolean; delta: number; ts: number }[] = [];
+  private appliedHistory: AppliedFlip[] = [];
   private bornAt = Date.now();
 
   constructor(state: DurableObjectState, env: Env) {
@@ -112,6 +119,16 @@ export class Tournament extends DurableObject<Env> {
     }
     if (url.pathname === "/api/tournament/state") {
       return Response.json(this.summary());
+    }
+    if (url.pathname === "/api/tournament/snapshot") {
+      // Bootstrap endpoint — full θ for new workers or workers who drifted.
+      // Phase 3 will move this payload to R2 (with a versioned URL).
+      return Response.json({
+        round: this.round,
+        task: this.task,
+        P,
+        theta: Array.from(this.theta),
+      });
     }
     if (url.pathname === "/api/tournament/reset" && request.method === "POST") {
       this.resetState();
@@ -139,6 +156,7 @@ export class Tournament extends DurableObject<Env> {
     this.accepted = 0;
     this.considered = 0;
     this.history = [];
+    this.appliedHistory = [];
     this.lastLoss = testLoss(this.theta, this.task);
     this.history.push({ round: -1, loss: this.lastLoss, accepted: false, delta: 0, ts: Date.now() });
   }
@@ -150,6 +168,7 @@ export class Tournament extends DurableObject<Env> {
       indices?: number[];
       values?: number[];
       delta?: number;
+      since_round?: number;
     }>();
     if (!body.worker_id) return new Response("missing worker_id", { status: 400 });
     this.joined.add(body.worker_id);
@@ -177,6 +196,7 @@ export class Tournament extends DurableObject<Env> {
 
     let advanced = false;
     let appliedDelta = 0;
+    let appliedFlip: AppliedFlip | null = null;
     if (this.proposalsReceived >= TARGET_PROPOSALS) {
       const applied = this.bestProposal && this.bestProposal.delta < 0;
       if (applied) {
@@ -186,6 +206,13 @@ export class Tournament extends DurableObject<Env> {
         }
         this.accepted += 1;
         appliedDelta = this.bestProposal!.delta;
+        appliedFlip = {
+          round: this.round,
+          indices: this.bestProposal!.indices.slice(),
+          values: this.bestProposal!.values.slice(),
+        };
+        this.appliedHistory.push(appliedFlip);
+        if (this.appliedHistory.length > 1000) this.appliedHistory.shift();
       }
       this.lastLoss = testLoss(this.theta, this.task);
       this.history.push({
@@ -202,16 +229,28 @@ export class Tournament extends DurableObject<Env> {
       advanced = true;
     }
 
+    // Phase 2: delta-only response. Worker sends since_round (its localRound);
+    // server replies with every applied flip since then so the worker can
+    // catch up on rounds advanced by other workers' submissions.
+    let appliedSince: AppliedFlip[] | null = null;
+    if (typeof body.since_round === "number") {
+      appliedSince = this.appliedHistory.filter(f => f.round >= body.since_round!);
+    }
+    const oldestAppliedRound = this.appliedHistory.length > 0
+      ? this.appliedHistory[0].round
+      : null;
     return Response.json({
       round: this.round,
       task: this.task,
-      theta: Array.from(this.theta),
       P,
       flip_size: FLIP_SIZE,
       target: TARGET_PROPOSALS,
       proposals: this.proposalsReceived,
       joined: this.joined.size,
       last_loss: this.lastLoss,
+      last_applied: appliedFlip,
+      applied_since: appliedSince,
+      oldest_applied_round: oldestAppliedRound,
       accept_rate: this.considered > 0 ? this.accepted / this.considered : 0,
       accepted,
       rejected,
