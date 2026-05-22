@@ -196,21 +196,24 @@ async function runWorker(worker, stopAt) {
   }
 }
 
-async function runOneSession(variant, seedSuffix) {
+async function runOneSession(variant, seedSuffix, attackerCount = 0) {
   await fetch(`${COORD}/api/lm/reset`, { method: "POST" });
   await new Promise(r => setTimeout(r, 50));
+  const honest = ["alpha", "delta", "bravo"];
+  const attackers = ["byz0", "byz1", "byz2"].slice(0, attackerCount);
   let workerIds;
   switch (variant) {
-    case "vanilla":         workerIds = ["alpha", "bravo", "delta"]; break;
-    case "sharded":         workerIds = ["alpha", "delta", "bravo"]; break;
-    case "byzantine":       workerIds = ["alpha", "delta", "bravo", "byz"]; break;
+    case "vanilla":   workerIds = honest; break;
+    case "sharded":   workerIds = honest; break;
+    case "byzantine": workerIds = [...honest, ...attackers]; break;
     default: throw new Error("unknown variant: " + variant);
   }
   const workers = workerIds.map(s => new Worker(`lm-${s}`, variant, seedSuffix));
   const running = workers.map(w => runWorker(w, ROUNDS_PER_RUN));
   await Promise.all(running);
   const final = await (await fetch(`${COORD}/api/lm/state`)).json();
-  return final.last_loss;
+  const fraudByWorker = final.worker_stats || {};
+  return { loss: final.last_loss, workerStats: fraudByWorker };
 }
 
 function meanStd(arr) {
@@ -220,27 +223,58 @@ function meanStd(arr) {
 }
 
 (async () => {
-  console.log(`Empirical study · ${N_SEEDS} seeds × ${ROUNDS_PER_RUN} rounds per variant\n`);
-  const variants = ["vanilla", "sharded", "byzantine"];
-  const results = {};
-  for (const v of variants) {
-    results[v] = [];
-    process.stdout.write(`${v.padEnd(12)}`);
-    for (let s = 0; s < N_SEEDS; s++) {
-      const loss = await runOneSession(v, s);
-      results[v].push(loss);
-      process.stdout.write(`  ${loss.toFixed(4)}`);
+  const mode = process.env.MODE || "variants";
+  if (mode === "attackers") {
+    // Phase 13: sweep attacker count from 0 to 3 (honest count stays at 3)
+    const counts = [0, 1, 2, 3];
+    const results = {};
+    console.log(`Attacker-count sweep · ${N_SEEDS} seeds × ${ROUNDS_PER_RUN} rounds per cell\n`);
+    console.log(`(3 honest workers + N attackers per run)\n`);
+    for (const k of counts) {
+      results[k] = [];
+      const label = `${k} atk`;
+      process.stdout.write(`${label.padEnd(12)}`);
+      for (let s = 0; s < N_SEEDS; s++) {
+        const r = await runOneSession("byzantine", s, k);
+        results[k].push(r.loss);
+        process.stdout.write(`  ${r.loss.toFixed(4)}`);
+      }
+      const ms = meanStd(results[k]);
+      const honest_share = 3 / (3 + k);
+      console.log(`   →  ${ms.mean.toFixed(4)} ± ${ms.std.toFixed(4)}    honest_share=${(honest_share*100).toFixed(0)}%`);
     }
-    const ms = meanStd(results[v]);
-    console.log(`   →  ${ms.mean.toFixed(4)} ± ${ms.std.toFixed(4)}`);
-  }
-  console.log("\n=== SUMMARY ===");
-  console.log("variant       n   mean    std     vs vanilla");
-  const vanillaMean = meanStd(results.vanilla).mean;
-  for (const v of variants) {
-    const ms = meanStd(results[v]);
-    const delta = ms.mean - vanillaMean;
-    const sign = delta >= 0 ? "+" : "";
-    console.log(`${v.padEnd(12)}  ${ms.n}  ${ms.mean.toFixed(4)}  ${ms.std.toFixed(4)}  ${sign}${delta.toFixed(4)}`);
+    console.log("\n=== ATTACKER-COUNT SUMMARY ===");
+    console.log("attackers   n   mean    std     vs 0-atk");
+    const baseMean = meanStd(results[0]).mean;
+    for (const k of counts) {
+      const ms = meanStd(results[k]);
+      const delta = ms.mean - baseMean;
+      const sign = delta >= 0 ? "+" : "";
+      console.log(`${String(k).padStart(2)}          ${ms.n}  ${ms.mean.toFixed(4)}  ${ms.std.toFixed(4)}  ${sign}${delta.toFixed(4)}`);
+    }
+  } else {
+    console.log(`Variant comparison · ${N_SEEDS} seeds × ${ROUNDS_PER_RUN} rounds per variant\n`);
+    const variants = ["vanilla", "sharded", "byzantine"];
+    const results = {};
+    for (const v of variants) {
+      results[v] = [];
+      process.stdout.write(`${v.padEnd(12)}`);
+      for (let s = 0; s < N_SEEDS; s++) {
+        const r = await runOneSession(v, s, v === "byzantine" ? 1 : 0);
+        results[v].push(r.loss);
+        process.stdout.write(`  ${r.loss.toFixed(4)}`);
+      }
+      const ms = meanStd(results[v]);
+      console.log(`   →  ${ms.mean.toFixed(4)} ± ${ms.std.toFixed(4)}`);
+    }
+    console.log("\n=== SUMMARY ===");
+    console.log("variant       n   mean    std     vs vanilla");
+    const vanillaMean = meanStd(results.vanilla).mean;
+    for (const v of variants) {
+      const ms = meanStd(results[v]);
+      const delta = ms.mean - vanillaMean;
+      const sign = delta >= 0 ? "+" : "";
+      console.log(`${v.padEnd(12)}  ${ms.n}  ${ms.mean.toFixed(4)}  ${ms.std.toFixed(4)}  ${sign}${delta.toFixed(4)}`);
+    }
   }
 })();

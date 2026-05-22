@@ -47,6 +47,29 @@ SEEDS=3 ROUNDS=1500 node scripts/empirical-study.mjs
 
 Wall-clock per run depends on the machine and on whether wrangler is also serving other traffic — not a useful absolute number. Scale `SEEDS` and `ROUNDS` to fit the run budget; the same-machine deltas between variants (the only thing that's actually being compared) survive any reasonable choice.
 
+## Attacker-count sweep (Phase 13)
+
+How does the Phase 9 defense scale with the *fraction* of attackers in the swarm? Run with `MODE=attackers`:
+
+```bash
+SEEDS=3 ROUNDS=1500 MODE=attackers node scripts/empirical-study.mjs
+```
+
+3 seeds per cell, honest worker count fixed at 3, attacker count varied 0..3:
+
+| attackers | honest share | n | mean | std | vs 0-atk |
+|---|---|---|---|---|---|
+| 0 | 100% | 3 | 1.8896 | 0.0054 | +0.0000 |
+| 1 | 75%  | 3 | 1.9568 | 0.0359 | +0.0671 |
+| 2 | 60%  | 3 | 1.8903 | 0.0911 | +0.0007 |
+| 3 | 50%  | 3 | 1.9783 | 0.0534 | +0.0887 |
+
+The Phase 9 quarantine holds up to **50% byzantine share** with < 5% loss degradation (+0.09 nats from baseline). This is because the defense is per-worker — each attacker independently hits its > 40% fraud threshold and gets quarantined regardless of how many other attackers exist. Honest workers continue contributing the whole time.
+
+This matches the "50% Byzantine tolerance" result from the earlier [Swarm](https://github.com/abgnydn/swarm-engine) work but at a different protocol layer: there, aggregation was the trimmed mean across reported gradients; here, the defense is "verify the claimed delta against the real global delta and quarantine outliers."
+
+Caveat: the test is single-shot — all attackers join at round 0 and stay byzantine throughout. A sophisticated attacker could mix honest and dishonest proposals to dodge the fraud threshold (act honest for the first 9 wins, attack on win 10+). The Phase 9 detection doesn't currently track moving windows. Plausible follow-up: sliding-window fraud rate over last N wins instead of cumulative.
+
 ## Caveats
 
 - The model is small (P = 2 379) and the text is short (340 chars). Real BitNet-class numbers would differ. The point of these numbers is *the protocol's behaviour shape under different worker configurations*, not absolute quality on a real text corpus.
