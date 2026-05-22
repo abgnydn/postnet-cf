@@ -129,10 +129,17 @@ class Worker {
   async fetchJson(url, init) {
     const body = init && init.body ? init.body : "";
     this.bytesUp += Buffer.byteLength(body);
-    const r = await fetch(url, init);
-    const text = await r.text();
-    this.bytesDown += Buffer.byteLength(text);
-    return JSON.parse(text);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const r = await fetch(url, init);
+        const text = await r.text();
+        this.bytesDown += Buffer.byteLength(text);
+        return JSON.parse(text);
+      } catch (e) {
+        if (attempt === 2) throw e;
+        await new Promise(r => setTimeout(r, 50 * (attempt + 1)));
+      }
+    }
   }
   async bootstrap() {
     // Phase 6: parallel shard fetch

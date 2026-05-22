@@ -124,8 +124,15 @@ class Worker {
     this.localRound = -1;
   }
   async fetchJson(url, init) {
-    const r = await fetch(url, init);
-    return await r.json();
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const r = await fetch(url, init);
+        return await r.json();
+      } catch (e) {
+        if (attempt === 2) throw e;
+        await new Promise(r => setTimeout(r, 50 * (attempt + 1)));
+      }
+    }
   }
   async bootstrap() {
     const meta = await this.fetchJson(`${COORD}/api/lm/snapshot`);
