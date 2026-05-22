@@ -1,8 +1,71 @@
 # postnet-cf
 
-Federated learning where workers are browser tabs and the coordinator is a Cloudflare Durable Object.
+Federated learning where workers are browser tabs and the coordinator is a Cloudflare Durable Object. Four protocol variants share the substrate — federated Adam, float-weight tournament, ternary-weight tournament, and a real-ML char-LM with sliding-window byzantine defense.
 
-A 129-parameter 2D classifier trained by federated SGD across whatever browser tabs you open. Each tab computes the gradient of BCE loss on its local synthetic batch (manual backprop, ~50 lines of JS), POSTs the gradient to the coord, the coord averages all gradients in the round's pool and applies an SGD-with-momentum step. State lives in a single Durable Object; θ is JSON-blobbed in every tick response.
+```bash
+npm install
+npx wrangler dev --port 8787
+# → open http://localhost:8787 (or /dashboard.html for all four side-by-side)
+```
+
+## What's in here
+
+| route | what | phase |
+|---|---|---|
+| `/` | federated Adam (gradient averaging) on 2D wave/circle/xor | baseline |
+| `/tournament.html` | flip-and-accept (float weights), delta-only broadcasts, R2 binary snapshots | 1-3 |
+| `/ternary.html` | ternary-weight tournament, 2-bit packed snapshots | 4 |
+| `/lm.html` | char-LM (context-2 MLP) with federated data shards, byzantine defense, WS push | 5-14 |
+| `/dashboard.html` | all four demos in one screen, live polled from each DO | 11 |
+
+All four pages are independent Durable Objects sharing the same Cloudflare project (`src/worker.ts` routes; `wrangler.jsonc` declares 4 DO bindings + 1 R2 bucket). Each round of every protocol is a real distributed step: real workers, real coord aggregation, real bandwidth on the wire.
+
+## Headline results
+
+- **Bandwidth scaling.** Phase 2 (delta-only) makes per-tick downlink **O(1)** in model size after a one-time bootstrap. Phase 6 (sharded snapshots) makes the bootstrap parallelizable, scaling to model sizes that don't fit in a single 100 MB Worker response. At BitNet 2B ternary (~282 MB) the per-tick payload is still ~340 B; the bootstrap is one R2 range-read.
+- **Byzantine tolerance at 50%.** Phase 9-14 defense (verify reported delta against the real global delta; quarantine workers exceeding 40% fraud rate on a 20-win sliding window) holds convergence within +0.09 nats of baseline at 50% byzantine share (3 honest + 3 attackers). See `docs/EMPIRICAL_STUDY.md`.
+- **Real ML loss.** The char-LM (Phase 8: context-2 MLP, P = 2 379) converges from random-init `log(V) ≈ 3.30` down to ~1.65 nats with real text diversity at R2000 — entirely via federated flip-and-accept on the cross-entropy surface, no gradients, no autograd.
+- **Real federated semantics.** Phase 7 splits the training text into disjoint shards by `workerId` hash. Each worker only scores proposals on its own 1/3 slice. The shared model still converges (1.85 ± 0.09 nats vs centralized 1.30 ± 0.03 nats), and a worker behind a hostile network never reveals its data — only the flips it proposed.
+
+## Phase progression
+
+| phase | what | commit |
+|---|---|---|
+| 1 | Float flip-and-accept tournament | `364a2ec` |
+| 2 | Delta-only broadcasts via `applied_since` | `9f27c7d` |
+| 3 | R2 binary snapshot bootstrap | `43e5676` |
+| 4 | Ternary weights (packed 2 bits/param) | `107a43d` |
+| 5 | Char-LM bigram (real ML loss) | `60fc2bc` |
+| 6 | Sharded snapshots, parallel R2 fetch | `bf2112c` |
+| 7 | Federated data shards (per-worker private slices) | `6134a2d` |
+| 8 | Context-2 MLP (escapes bigram mode collapse) | `8c33df5` |
+| 9 | Byzantine fraud detection + quarantine | `804517e` |
+| 10 | WebSocket push for low-latency updates | `ff670ea` |
+| 11 | `/dashboard.html` unified view | `ea54e55` |
+| 12 | Multi-seed empirical study | `9cf96fa` |
+| 13 | Attacker-count sweep — defense holds at 50% byzantine | `69ddc28` |
+| 14 | Sliding-window fraud detection (defends against patient attackers) | `f935e22` |
+
+Each phase ships a real change to the protocol or the demo and is documented either in `docs/` or in a per-phase commit message that includes the empirical result.
+
+## Verifier scripts
+
+| script | what |
+|---|---|
+| `scripts/headless-worker.mjs` | Federated Adam (the `/` demo) |
+| `scripts/tournament-verifier.mjs` | Float tournament (Phase 1-3) |
+| `scripts/ternary-verifier.mjs` | Ternary tournament (Phase 4) |
+| `scripts/lm-verifier.mjs` | Char-LM with optional `BYZANTINE=1` attacker |
+| `scripts/empirical-study.mjs` | Multi-seed comparison (`MODE=variants`, `attackers`, `smart`) |
+| `scripts/bandwidth-sweep.mjs` | Static scaling analysis (no live coord needed) |
+
+All headless verifiers expect `wrangler dev` running on port 8787.
+
+---
+
+## Original (Phase 0) — federated Adam
+
+A 129-parameter 2D classifier trained by federated SGD across whatever browser tabs you open. Each tab computes the gradient of BCE loss on its local synthetic batch (manual backprop, ~50 lines of JS), POSTs the gradient to the coord, the coord averages all gradients in the round's pool and applies an Adam step. State lives in a single Durable Object; θ is JSON-blobbed in every tick response.
 
 Architecture:
 
