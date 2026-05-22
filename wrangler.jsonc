@@ -9,13 +9,18 @@
   },
   "durable_objects": {
     "bindings": [
-      { "name": "COORD", "class_name": "Coord" }
+      { "name": "COORD", "class_name": "Coord" },
+      { "name": "TOURNAMENT", "class_name": "Tournament" }
     ]
   },
   "migrations": [
     {
       "tag": "v1",
       "new_sqlite_classes": ["Coord"]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": ["Tournament"]
     }
   ],
   "observability": { "enabled": true }

@@ -13,9 +13,11 @@
  * Wavy boundary task: label = sin(2x) > y.
  */
 import { DurableObject } from "cloudflare:workers";
+export { Tournament } from "./tournament";
 
 export interface Env {
   COORD: DurableObjectNamespace;
+  TOURNAMENT: DurableObjectNamespace;
   ASSETS: Fetcher;
 }
 
@@ -230,6 +232,10 @@ export class Coord extends DurableObject<Env> {
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+    if (url.pathname.startsWith("/api/tournament/")) {
+      const id = env.TOURNAMENT.idFromName("default");
+      return env.TOURNAMENT.get(id).fetch(request);
+    }
     if (url.pathname.startsWith("/api/")) {
       const id = env.COORD.idFromName("default");
       return env.COORD.get(id).fetch(request);

@@ -103,11 +103,34 @@ Browser-side constants in `public/worker.js`:
 - `BATCH_SIZE = 64` — synthetic samples per local gradient
 - `POLL_DELAY_MS = 80` — pause between worker tick loops
 
+## Phase 1 — tournament protocol (fusedx integration)
+
+The same task with a different aggregation shape: instead of every worker sending a gradient and the coord averaging them, every worker locally tries `K = 8` random flips of `4` parameters, scores each on its private batch, and submits just its **single best** `(indices, values, Δloss)`. The coord picks the best across all workers in the round and applies it.
+
+| protocol | uplink per worker per round | model-size dependent? |
+|---|---|---|
+| federated Adam (this repo, `/`) | 4·P bytes ≈ 520 B | yes |
+| tournament (this repo, `/tournament.html`) | `flip_size · 8 + 4` ≈ 36 B | **no** |
+
+Headless verifier results across 3 workers × 400 rounds:
+
+| task | tournament final loss | federated-Adam final loss | accept rate |
+|---|---|---|---|
+| circle | 0.07 ✓ | 0.07 ✓ | ~49% |
+| xor | 0.07 ✓ | 0.04 ✓ | ~49% |
+| wave | 0.21 △ | 0.10 ✓ | ~49% |
+
+Tournament converges on circle/xor at parity; the wave task is slower under flip-and-accept (no gradient signal — pure guess-and-check). That's expected. The point of Phase 1 is the **protocol shape**, not the optimizer's competitiveness on a 129-param toy. Phases 2/3 swap in delta-only θ broadcasts via R2 and a real BitNet model — at which point the constant-bandwidth uplink starts to matter.
+
+```bash
+node scripts/tournament-verifier.mjs   # smoke-test the protocol
+```
+
+UI is at `/tournament.html`. Same task selector, same boundary canvas, plus an accept-rate stat and green ticks on the chart marking applied rounds.
+
 ## Open questions / future moves
 
 - **Real workload.** Swap the synthetic 2D classifier for `fusedx`'s `gpt-gradfree-engine.ts` or a TF.js MNIST model. Same coord, real ML compute.
 - **Cross-machine demo.** After `wrangler deploy`, send the URL to a friend. Watch their machine become peer #N.
 - **Real federated angle.** Currently every tab samples from the same synthetic distribution. For "true" FL, give each tab a different shard or different data domain.
 - **DKIM / Postnet bridge.** Wire this same coord shape to the email-based Postnet transport so the system tolerates workers behind hostile networks where outbound HTTPS doesn't reach Cloudflare.
-- **LR decay.** Current loss curve oscillates due to momentum + constant LR. A `lr / sqrt(1 + round/100)` schedule would smooth it.
-- **Adam.** Would handle the plateau-escape automatically without manual momentum tuning. ~80 lines extra in the coord.

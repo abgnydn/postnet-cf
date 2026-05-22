@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Postnet × Cloudflare — federated ES demo</title>
+  <title>Postnet × Cloudflare — tournament protocol (Phase 1)</title>
   <style>
     :root {
       --ink: #1a1a1a;
@@ -22,7 +22,19 @@
       line-height: 1.5;
     }
     h1 { font-weight: 700; margin: 0 0 4px; letter-spacing: -0.02em; }
-    .sub { color: #666; margin: 0 0 28px; font-size: 14px; }
+    .sub { color: #666; margin: 0 0 12px; font-size: 14px; }
+    .phase {
+      display: inline-block;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--accent);
+      border: 1px solid var(--accent);
+      padding: 2px 8px;
+      border-radius: 3px;
+      margin-bottom: 14px;
+    }
     .panel {
       border: 1px solid var(--rule);
       border-radius: 6px;
@@ -82,21 +94,27 @@
       border-radius: 6px;
       margin-top: 12px;
     }
-    .note {
-      font-size: 12px;
-      color: #555;
-      margin-top: 12px;
-      line-height: 1.45;
-    }
+    .note { font-size: 12px; color: #555; margin-top: 12px; line-height: 1.45; }
     code { background: #efece4; padding: 1px 5px; border-radius: 3px; font-size: 12.5px; }
+    .nav { font-size: 12px; color: #666; margin-bottom: 18px; }
+    .nav a { color: var(--accent); text-decoration: none; }
+    .nav a:hover { text-decoration: underline; }
   </style>
 </head>
 <body>
-  <h1>Postnet × Cloudflare</h1>
-  <p class="sub">A 129-parameter 2D classifier trained by federated Adam across whatever browser tabs you open. Workers compute ∇L on local batches in JS; the Cloudflare Durable Object averages and steps. Switch the task from the dropdown to retrain the same architecture on a new objective. Same task with a different aggregation protocol: <a href="/tournament.html" style="color:#d6502c;">flip-and-accept tournament →</a></p>
+  <div class="nav"><a href="/">← federated Adam demo</a></div>
+  <span class="phase">Phase 1 · tournament protocol</span>
+  <h1>Postnet × Cloudflare — tournament</h1>
+  <p class="sub">
+    Same 2D classifier task as the federated-Adam page, but a different
+    aggregation protocol: each worker locally tries K random flips, submits its
+    best <code>(indices, values, Δloss)</code>, and the coordinator picks the
+    single best across all workers in the round. ~32 B uplink per worker,
+    regardless of model size.
+  </p>
 
   <div class="panel">
-    <button id="join">Join swarm</button>
+    <button id="join">Join tournament</button>
     <button id="reset" class="secondary">Reset coordinator</button>
     <label style="margin-left:14px;font-size:13px;">
       task
@@ -109,31 +127,33 @@
     <div class="stats">
       <div class="stat"><label>worker</label><b id="wid">—</b></div>
       <div class="stat"><label>round</label><b id="round">—</b></div>
-      <div class="stat"><label>pool</label><b id="pool">—</b></div>
+      <div class="stat"><label>proposals</label><b id="pool">—</b></div>
       <div class="stat"><label>peers</label><b id="peers">—</b></div>
       <div class="stat"><label>test loss</label><b id="loss">—</b></div>
+      <div class="stat"><label>accept rate</label><b id="ar">—</b></div>
     </div>
     <canvas id="chart" width="900" height="240"></canvas>
     <div class="boundary-wrap">
       <canvas id="boundary" width="320" height="320"></canvas>
       <div class="legend">
-        <p><b>Decision boundary, live.</b></p>
-        <p>Each pixel = the swarm's current θ run through the forward pass at that (x, y).
-        Color is the predicted probability of class 1. The thin black curve is the
-        ground truth: <code>sin(2x) &gt; y</code>. The model should bend into that wavy
-        shape as the swarm converges.</p>
-        <p style="color:#666;font-size:11px;margin-top:8px;">x, y ∈ [−2, 2] · 320×320 grid · forward pass at every pixel each round</p>
+        <p><b>Decision boundary.</b> Same forward pass as the Adam demo, but
+        θ is updated by accepting whichever worker's flip dropped loss the
+        most. Green ticks at the chart's bottom edge mark rounds whose best
+        proposal was applied (Δ &lt; 0).</p>
+        <p style="color:#666;font-size:11px;margin-top:8px;">
+          K = 8 local trials per worker · flip size = 4 params · σ = 0.15
+        </p>
       </div>
     </div>
     <div id="log">(idle)</div>
     <p class="note">
-      Open this page in <b>more tabs</b> (or send the URL to a friend) to add workers.
-      The coordinator (a Cloudflare Durable Object) averages every <code>2+</code> gradients
-      it gets and steps θ. Loss should plunge and the boundary should bend into the
-      wave within a few dozen rounds.
+      Each worker round costs ~K=8 forward passes on a batch of 128. Convergence
+      is slower than Adam (no gradient signal — just guess-and-check), but the
+      <b>uplink is constant in model size</b>. Phase 2 will move the θ
+      broadcast to R2 deltas so downlink scales the same way.
     </p>
   </div>
 
-  <script type="module" src="/worker.js"></script>
+  <script type="module" src="/tournament-worker.js"></script>
 </body>
 </html>
