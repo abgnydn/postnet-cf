@@ -163,6 +163,9 @@ export class TournamentLM extends DurableObject<Env> {
   // A worker whose winning proposals actually *increase* full-text loss is
   // suspect — they're claiming improvements that aren't there.
   private workerStats = new Map<string, { wins: number; frauds: number; lastWinRound: number }>();
+  // Phase 10: WebSocket subscribers — receive applied_since pushes
+  // immediately on round advance instead of polling.
+  private subscribers = new Set<WebSocket>();
   private bornAt = Date.now();
 
   constructor(state: DurableObjectState, env: Env) {
@@ -295,7 +298,33 @@ export class TournamentLM extends DurableObject<Env> {
       await this.resetState();
       return Response.json({ ok: true });
     }
+    if (url.pathname === "/api/lm/ws") {
+      // Phase 10: push protocol. Worker connects, server sends applied_since
+      // (and the current round/task) as soon as anything advances.
+      const upgrade = request.headers.get("upgrade");
+      if (upgrade !== "websocket") return new Response("expected websocket", { status: 426 });
+      const pair = new WebSocketPair();
+      const [client, server] = Object.values(pair);
+      server.accept();
+      this.subscribers.add(server);
+      server.send(JSON.stringify({
+        type: "hello",
+        round: this.round,
+        last_loss: this.lastLoss,
+        recent: this.appliedHistory.slice(-50),
+      }));
+      server.addEventListener("close", () => { this.subscribers.delete(server); });
+      server.addEventListener("error", () => { this.subscribers.delete(server); });
+      return new Response(null, { status: 101, webSocket: client });
+    }
     return new Response("not found", { status: 404 });
+  }
+
+  private broadcast(msg: object) {
+    const text = JSON.stringify(msg);
+    for (const ws of this.subscribers) {
+      try { ws.send(text); } catch { this.subscribers.delete(ws); }
+    }
   }
 
   private async resetState() {
@@ -421,6 +450,13 @@ export class TournamentLM extends DurableObject<Env> {
       this.bestProposal = null;
       this.proposalsReceived = 0;
       advanced = true;
+      // Phase 10: push to subscribers
+      this.broadcast({
+        type: "advance",
+        round: this.round,
+        last_loss: this.lastLoss,
+        applied: appliedFlip,
+      });
     }
 
     let appliedSince: AppliedFlip[] | null = null;

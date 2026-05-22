@@ -161,6 +161,9 @@ let history = [];
 let localTheta = null;
 let localRound = -1;
 let bytesUp = 0, bytesDown = 0;
+// Phase 10: WebSocket push
+let ws = null;
+let wsConnected = false;
 
 function log(s) {
   const stamp = new Date().toLocaleTimeString();
@@ -317,14 +320,53 @@ async function pullState() {
   } catch (e) {}
 }
 
+function openWebSocket() {
+  try {
+    const proto = location.protocol === "https:" ? "wss:" : "ws:";
+    ws = new WebSocket(`${proto}//${location.host}/api/lm/ws`);
+    ws.addEventListener("open", () => {
+      wsConnected = true;
+      log("ws connected");
+    });
+    ws.addEventListener("message", (e) => {
+      bytesDown += e.data.length;
+      updateBwStat();
+      try {
+        const m = JSON.parse(e.data);
+        if (m.type === "advance" && localTheta) {
+          if (m.applied && m.applied.round === localRound) applyDelta(m.applied);
+          localRound = m.round;
+          if (localRound % 25 === 0) updateSample();
+          renderBoundaryNoop();
+        } else if (m.type === "hello" && localTheta && Array.isArray(m.recent)) {
+          for (const flip of m.recent) {
+            if (flip.round >= localRound) applyDelta(flip);
+          }
+          localRound = m.round;
+        }
+      } catch {}
+    });
+    ws.addEventListener("close", () => { wsConnected = false; log("ws closed — back to polling"); });
+    ws.addEventListener("error", () => { wsConnected = false; });
+  } catch (e) {
+    log(`ws failed: ${e.message}`);
+  }
+}
+
+function renderBoundaryNoop() {}  // hook for future renderBoundary() integration
+
 async function runForever() {
   await bootstrap();
+  openWebSocket();
   const trial = new Float32Array(P);
   while (running) {
     try {
-      const pulled = await tickPoll();
-      updateStats(pulled);
-      await reconcile(pulled);
+      // Phase 10: skip the explicit poll when WS is providing pushes
+      if (!wsConnected) {
+        const pulled = await tickPoll();
+        updateStats(pulled);
+        await reconcile(pulled);
+      }
 
       const seed = ((localRound + 1) * 1000003) ^ (workerId.charCodeAt(0) * 31 + workerId.charCodeAt(2));
       const rng = mulberry32(seed);
