@@ -158,6 +158,11 @@ export class TournamentLM extends DurableObject<Env> {
   private appliedHistory: AppliedFlip[] = [];
   private snapshotRound = 0;
   private snapshotShards: string[] = [];   // R2 keys, one per shard
+  // Phase 9: byzantine fraud tracking. Honest workers report delta ≈ scaled
+  // version of the global delta (they only see a shard, but signs should agree).
+  // A worker whose winning proposals actually *increase* full-text loss is
+  // suspect — they're claiming improvements that aren't there.
+  private workerStats = new Map<string, { wins: number; frauds: number; lastWinRound: number }>();
   private bornAt = Date.now();
 
   constructor(state: DurableObjectState, env: Env) {
@@ -307,6 +312,7 @@ export class TournamentLM extends DurableObject<Env> {
     this.appliedHistory = [];
     this.snapshotRound = 0;
     this.snapshotShards = [];
+    this.workerStats.clear();
     this.lastLoss = testLoss(this.theta);
     this.history.push({ round: -1, loss: this.lastLoss, accepted: false, delta: 0, ts: Date.now() });
     await this.publishSnapshot();
@@ -344,20 +350,28 @@ export class TournamentLM extends DurableObject<Env> {
     if (!body.worker_id) return new Response("missing worker_id", { status: 400 });
     this.joined.add(body.worker_id);
 
-    let accepted = false, rejected = false;
+    let accepted = false, rejected = false, quarantined = false;
     if (Array.isArray(body.indices) && Array.isArray(body.values) && typeof body.delta === "number") {
       if (body.round === this.round && body.indices.length === body.values.length) {
-        this.considered += 1;
-        if (!this.bestProposal || body.delta < this.bestProposal.delta) {
-          this.bestProposal = {
-            worker_id: body.worker_id,
-            indices: body.indices,
-            values: body.values,
-            delta: body.delta,
-          };
+        // Phase 9: quarantine high-fraud workers. After 10 wins, if > 40% of
+        // them increased the global loss, skip their proposals entirely.
+        const stats = this.workerStats.get(body.worker_id);
+        const fraudRate = stats && stats.wins >= 10 ? stats.frauds / stats.wins : 0;
+        if (fraudRate > 0.4) {
+          quarantined = true;
+        } else {
+          this.considered += 1;
+          if (!this.bestProposal || body.delta < this.bestProposal.delta) {
+            this.bestProposal = {
+              worker_id: body.worker_id,
+              indices: body.indices,
+              values: body.values,
+              delta: body.delta,
+            };
+          }
+          this.proposalsReceived += 1;
+          accepted = true;
         }
-        this.proposalsReceived += 1;
-        accepted = true;
       } else {
         rejected = true;
       }
@@ -368,6 +382,7 @@ export class TournamentLM extends DurableObject<Env> {
     let appliedFlip: AppliedFlip | null = null;
     if (this.proposalsReceived >= TARGET_PROPOSALS) {
       const apply = this.bestProposal && this.bestProposal.delta < 0;
+      const lossBefore = this.lastLoss;
       if (apply) {
         for (let i = 0; i < this.bestProposal!.indices.length; i++) {
           const idx = this.bestProposal!.indices[i];
@@ -387,6 +402,19 @@ export class TournamentLM extends DurableObject<Env> {
         }
       }
       this.lastLoss = testLoss(this.theta);
+      // Phase 9: Byzantine fraud detection. A winning worker who claimed
+      // a negative delta but whose flip actually raised the global loss is
+      // suspect. Honest workers may have noisy estimates from sharded data
+      // but their sign should align with the global change.
+      if (apply && this.bestProposal) {
+        const realGlobalDelta = this.lastLoss - lossBefore;
+        const winnerId = this.bestProposal.worker_id;
+        const stats = this.workerStats.get(winnerId) ?? { wins: 0, frauds: 0, lastWinRound: -1 };
+        stats.wins += 1;
+        stats.lastWinRound = this.round;
+        if (realGlobalDelta > 1e-4 && this.bestProposal.delta < -1e-4) stats.frauds += 1;
+        this.workerStats.set(winnerId, stats);
+      }
       this.history.push({ round: this.round, loss: this.lastLoss, accepted: !!apply, delta: appliedDelta, ts: Date.now() });
       if (this.history.length > 500) this.history.splice(0, this.history.length - 500);
       this.round += 1;
@@ -413,14 +441,24 @@ export class TournamentLM extends DurableObject<Env> {
       applied_since: appliedSince,
       oldest_applied_round: oldestAppliedRound,
       accept_rate: this.considered > 0 ? this.accepted / this.considered : 0,
-      accepted, rejected, advanced,
+      accepted, rejected, quarantined, advanced,
     });
   }
 
   private summary() {
+    const workerReport: Record<string, { wins: number; frauds: number; fraud_rate: number; lastWinRound: number }> = {};
+    for (const [wid, stats] of this.workerStats.entries()) {
+      workerReport[wid] = {
+        wins: stats.wins,
+        frauds: stats.frauds,
+        fraud_rate: stats.wins > 0 ? stats.frauds / stats.wins : 0,
+        lastWinRound: stats.lastWinRound,
+      };
+    }
     return {
       round: this.round,
       P, V, E, HID, CTX,
+      worker_stats: workerReport,
       flip_size: FLIP_SIZE,
       target: TARGET_PROPOSALS,
       proposals: this.proposalsReceived,

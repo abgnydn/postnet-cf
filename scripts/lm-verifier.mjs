@@ -197,6 +197,7 @@ async function runWorker(worker, stopAt) {
   const trial = new Float32Array(P);
   const shard = shardForWorker(worker.id);
   worker.shard = shard;
+  const isByzantine = worker.id.includes("byz");
   while (true) {
     const pulled = await worker.tick();
     if (pulled.round >= stopAt) return;
@@ -205,16 +206,22 @@ async function runWorker(worker, stopAt) {
     const seed = ((worker.localRound + 1) * 1000003) ^
                  (worker.id.charCodeAt(0) * 31 + worker.id.charCodeAt(2));
     const rng = mulberry32(seed);
-    // Phase 7: score only on this worker's private shard
-    const lossBefore = textLoss(worker.localTheta, shard.start, shard.end);
-    let best = null;
-    for (let t = 0; t < TRIALS; t++) {
+    let best;
+    if (isByzantine) {
+      // Phase 9 attacker: propose random flips, lie about delta to win the tournament
       const { indices, values } = proposeFlip(worker.localTheta, rng);
-      for (let i = 0; i < P; i++) trial[i] = worker.localTheta[i];
-      for (let k = 0; k < indices.length; k++) trial[indices[k]] = values[k];
-      const lossAfter = textLoss(trial, shard.start, shard.end);
-      const delta = lossAfter - lossBefore;
-      if (!best || delta < best.delta) best = { indices, values, delta };
+      best = { indices, values, delta: -10 };  // huge fake improvement
+    } else {
+      const lossBefore = textLoss(worker.localTheta, shard.start, shard.end);
+      best = null;
+      for (let t = 0; t < TRIALS; t++) {
+        const { indices, values } = proposeFlip(worker.localTheta, rng);
+        for (let i = 0; i < P; i++) trial[i] = worker.localTheta[i];
+        for (let k = 0; k < indices.length; k++) trial[indices[k]] = values[k];
+        const lossAfter = textLoss(trial, shard.start, shard.end);
+        const delta = lossAfter - lossBefore;
+        if (!best || delta < best.delta) best = { indices, values, delta };
+      }
     }
     const reported = await worker.tick(worker.localRound, best.indices, best.values, best.delta);
     await worker.reconcile(reported);
@@ -230,7 +237,10 @@ async function runWorker(worker, stopAt) {
   await fetch(`${COORD}/api/lm/reset`, { method: "POST" });
   // Phase 7: hand-pick worker ids so we hit each shard exactly once
   // alpha → shard 0, delta → shard 1, bravo → shard 2 (hand-picked for full coverage)
-  const workers = ["alpha", "delta", "bravo"].map(suffix => new Worker(`lm-${suffix}`));
+  // Phase 9: include "lm-byz" if BYZANTINE=1 — a worker that lies about its delta
+  const workerIds = ["alpha", "delta", "bravo"];
+  if (process.env.BYZANTINE === "1") workerIds.push("byz");
+  const workers = workerIds.map(suffix => new Worker(`lm-${suffix}`));
   for (const w of workers) {
     const sh = shardForWorker(w.id);
     console.log(`  ${w.id} → shard${sh.idx} [${sh.start}..${sh.end}]`);
@@ -253,6 +263,14 @@ async function runWorker(worker, stopAt) {
   const final = await sampler;
   const totalDown = workers.reduce((a, w) => a + w.bytesDown, 0);
   console.log(`\nfinal R${final.round} loss=${final.last_loss.toFixed(4)} accept=${(final.accept_rate*100).toFixed(1)}%`);
-  console.log(`bandwidth (3 workers): ${(totalDown/1024).toFixed(1)} KB down`);
+  console.log(`bandwidth: ${(totalDown/1024).toFixed(1)} KB down`);
   console.log(`final sample: ${JSON.stringify(final.sample.slice(0, 100))}`);
+  // Phase 9: per-worker fraud report
+  if (final.worker_stats) {
+    console.log("\nworker_stats:");
+    for (const [wid, st] of Object.entries(final.worker_stats)) {
+      const tag = st.fraud_rate > 0.5 ? " ← BYZANTINE" : "";
+      console.log(`  ${wid.padEnd(14)} wins=${String(st.wins).padStart(4)} frauds=${String(st.frauds).padStart(4)} (${(st.fraud_rate*100).toFixed(1)}%)${tag}`);
+    }
+  }
 })();

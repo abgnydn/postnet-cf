@@ -243,6 +243,32 @@ Convergence on full text (3 workers × 1500 rounds): 3.27 → 1.94 (vs the centr
 
 This is real FL semantics: workers cannot see each other's data, the coord aggregates only the proposed *parameter updates*, and the global model fits the union of private datasets. Combined with Phase 2's delta-only broadcasts, a worker behind a hostile network can participate without ever revealing what it trained on — only the flips it proposed.
 
+### Phase 8 — context-2 MLP (escapes the bigram mode collapse)
+
+Phase 5's bigram couldn't beat the "the the the…" attractor — a 1-char-context model has no notion of what it just emitted. Phase 8 swaps in a real two-char-context MLP: `embed (V×E) + fc1 (2E×H) + relu + fc2 (H×V) + biases`, with V=27, E=16, H=32, CTX=2 → **P = 2 379 params**. Same protocol, same DO, same R2 sharded snapshots (now 10 shards at 1 KB each).
+
+Convergence on full text (3 workers × 3 disjoint shards × 2000 rounds): 3.32 → 1.63. At R2000 the sample produces real diversity — `"the slin the slin the wh the soge slin…"` — pseudo-words that respect the 2-char Markov structure of the training text. Mode collapse broken.
+
+### Phase 9 — Byzantine fraud detection (and defense)
+
+Every protocol so far trusted the worker's reported `delta` blindly. A malicious worker can sabotage training by submitting a random flip but claiming a hugely negative delta — it always "wins" the tournament, and the coord applies its bad flip every round. We saw the attack work: with no defense, **adding one byzantine worker raised final loss from 1.63 → 2.35**.
+
+Defense: the coord already computes `testLoss(theta)` after applying a flip. Compare to `lastLoss` before applying — that's the *real* global delta. A worker that wins with a claimed `delta < 0` but whose flip actually raises global loss is a fraud. After 10 wins, if **> 40% of them were frauds**, that worker is quarantined — its future proposals are skipped entirely.
+
+```
+$ ROUNDS=1500 BYZANTINE=1 node scripts/lm-verifier.mjs
+...
+worker_stats:
+  lm-alpha   wins= 400  frauds=  70  (17.5%)
+  lm-delta   wins= 430  frauds=  97  (22.6%)
+  lm-bravo   wins= 456  frauds= 119  (26.1%)
+  lm-byz     wins= 214  frauds=  86  (40.2%)   ← detected & quarantined
+```
+
+Honest workers also have a "fraud" rate (~17-26%) because each worker's shard-local delta doesn't perfectly correlate with the global delta — those are false positives from data heterogeneity, not real attacks. The signal is the gap: honest sits around 20%, malicious lands at 40%+. Convergence recovers from 2.35 (no defense) → 1.82 (defended) → 1.63 (honest-only baseline).
+
+This connects to the federated-Byzantine-tolerance work in [The Swarm](https://github.com/abgnydn/swarm-engine) — same principle (verify the claimed result against an independent measurement), different protocol layer.
+
 ## Open questions / future moves
 
 - **Real workload.** Swap the synthetic 2D classifier for `fusedx`'s `gpt-gradfree-engine.ts` or a TF.js MNIST model. Same coord, real ML compute.
