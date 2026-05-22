@@ -107,6 +107,12 @@ export class Tournament extends DurableObject<Env> {
   private appliedHistory: AppliedFlip[] = [];
   private snapshotRound = 0;     // round of the most recent published snapshot
   private snapshotKey = "";      // R2 object key of the most recent snapshot
+  // Phase 16: byzantine fraud tracking, ported from TournamentLM
+  private workerStats = new Map<string, {
+    wins: number; frauds: number; lastWinRound: number; recent: number[];
+  }>();
+  // Phase 16: WebSocket push subscribers
+  private subscribers = new Set<WebSocket>();
   private bornAt = Date.now();
 
   constructor(state: DurableObjectState, env: Env) {
@@ -196,6 +202,23 @@ export class Tournament extends DurableObject<Env> {
       await this.resetState();
       return Response.json({ ok: true, task: this.task });
     }
+    if (url.pathname === "/api/tournament/ws") {
+      const upgrade = request.headers.get("upgrade");
+      if (upgrade !== "websocket") return new Response("expected websocket", { status: 426 });
+      const pair = new WebSocketPair();
+      const [client, server] = Object.values(pair);
+      server.accept();
+      this.subscribers.add(server);
+      server.send(JSON.stringify({
+        type: "hello",
+        round: this.round,
+        last_loss: this.lastLoss,
+        recent: this.appliedHistory.slice(-50),
+      }));
+      server.addEventListener("close", () => { this.subscribers.delete(server); });
+      server.addEventListener("error", () => { this.subscribers.delete(server); });
+      return new Response(null, { status: 101, webSocket: client });
+    }
     if (url.pathname === "/api/tournament/set_task" && request.method === "POST") {
       const body = await request.json<{ task?: string }>();
       const t = body.task as Task;
@@ -221,6 +244,7 @@ export class Tournament extends DurableObject<Env> {
     this.appliedHistory = [];
     this.snapshotRound = 0;
     this.snapshotKey = "";
+    this.workerStats.clear();
     this.lastLoss = testLoss(this.theta, this.task);
     this.history.push({ round: -1, loss: this.lastLoss, accepted: false, delta: 0, ts: Date.now() });
     await this.publishSnapshot();
@@ -240,20 +264,32 @@ export class Tournament extends DurableObject<Env> {
 
     let accepted = false;
     let rejected = false;
+    let quarantined = false;
     if (Array.isArray(body.indices) && Array.isArray(body.values) && typeof body.delta === "number") {
       if (body.round === this.round && body.indices.length === body.values.length) {
-        this.considered += 1;
-        // Keep the best proposal seen this round (most negative delta)
-        if (!this.bestProposal || body.delta < this.bestProposal.delta) {
-          this.bestProposal = {
-            worker_id: body.worker_id,
-            indices: body.indices,
-            values: body.values,
-            delta: body.delta,
-          };
+        // Phase 16: byzantine quarantine ported from TournamentLM
+        const stats = this.workerStats.get(body.worker_id);
+        const cumRate = stats && stats.wins >= 10 ? stats.frauds / stats.wins : 0;
+        const recent = stats?.recent ?? [];
+        const winRate = recent.length >= 10
+          ? recent.reduce((a, b) => a + b, 0) / recent.length
+          : 0;
+        const fraudRate = Math.max(cumRate, winRate);
+        if (fraudRate > 0.4) {
+          quarantined = true;
+        } else {
+          this.considered += 1;
+          if (!this.bestProposal || body.delta < this.bestProposal.delta) {
+            this.bestProposal = {
+              worker_id: body.worker_id,
+              indices: body.indices,
+              values: body.values,
+              delta: body.delta,
+            };
+          }
+          this.proposalsReceived += 1;
+          accepted = true;
         }
-        this.proposalsReceived += 1;
-        accepted = true;
       } else {
         rejected = true;
       }
@@ -263,8 +299,9 @@ export class Tournament extends DurableObject<Env> {
     let appliedDelta = 0;
     let appliedFlip: AppliedFlip | null = null;
     if (this.proposalsReceived >= TARGET_PROPOSALS) {
-      const applied = this.bestProposal && this.bestProposal.delta < 0;
-      if (applied) {
+      const apply = this.bestProposal && this.bestProposal.delta < 0;
+      const lossBefore = this.lastLoss;
+      if (apply) {
         for (let i = 0; i < this.bestProposal!.indices.length; i++) {
           const idx = this.bestProposal!.indices[i];
           if (idx >= 0 && idx < P) this.theta[idx] = this.bestProposal!.values[i];
@@ -278,17 +315,28 @@ export class Tournament extends DurableObject<Env> {
         };
         this.appliedHistory.push(appliedFlip);
         if (this.appliedHistory.length > 1000) this.appliedHistory.shift();
-        // Re-anchor R2 snapshot every SNAPSHOT_EVERY accepted rounds so
-        // fresh workers bootstrap from a recent θ rather than R0.
         if (this.accepted > 0 && this.accepted % SNAPSHOT_EVERY === 0) {
           this.ctx.waitUntil(this.publishSnapshot());
         }
       }
       this.lastLoss = testLoss(this.theta, this.task);
+      // Phase 16: byzantine fraud accounting
+      if (apply && this.bestProposal) {
+        const realGlobalDelta = this.lastLoss - lossBefore;
+        const winnerId = this.bestProposal.worker_id;
+        const stats = this.workerStats.get(winnerId) ?? { wins: 0, frauds: 0, lastWinRound: -1, recent: [] };
+        stats.wins += 1;
+        stats.lastWinRound = this.round;
+        const isFraud = realGlobalDelta > 1e-4 && this.bestProposal.delta < -1e-4;
+        if (isFraud) stats.frauds += 1;
+        stats.recent.push(isFraud ? 1 : 0);
+        if (stats.recent.length > 20) stats.recent.shift();
+        this.workerStats.set(winnerId, stats);
+      }
       this.history.push({
         round: this.round,
         loss: this.lastLoss,
-        accepted: !!applied,
+        accepted: !!apply,
         delta: appliedDelta,
         ts: Date.now(),
       });
@@ -297,6 +345,17 @@ export class Tournament extends DurableObject<Env> {
       this.bestProposal = null;
       this.proposalsReceived = 0;
       advanced = true;
+      // Phase 16: WS push
+      for (const ws of this.subscribers) {
+        try {
+          ws.send(JSON.stringify({
+            type: "advance",
+            round: this.round,
+            last_loss: this.lastLoss,
+            applied: appliedFlip,
+          }));
+        } catch { this.subscribers.delete(ws); }
+      }
     }
 
     // Phase 2: delta-only response. Worker sends since_round (its localRound);
@@ -324,11 +383,20 @@ export class Tournament extends DurableObject<Env> {
       accept_rate: this.considered > 0 ? this.accepted / this.considered : 0,
       accepted,
       rejected,
+      quarantined,
       advanced,
     });
   }
 
   private summary() {
+    const workerReport: Record<string, { wins: number; frauds: number; fraud_rate: number }> = {};
+    for (const [wid, stats] of this.workerStats.entries()) {
+      workerReport[wid] = {
+        wins: stats.wins,
+        frauds: stats.frauds,
+        fraud_rate: stats.wins > 0 ? stats.frauds / stats.wins : 0,
+      };
+    }
     return {
       round: this.round,
       task: this.task,
@@ -342,6 +410,7 @@ export class Tournament extends DurableObject<Env> {
       accepted: this.accepted,
       considered: this.considered,
       accept_rate: this.considered > 0 ? this.accepted / this.considered : 0,
+      worker_stats: workerReport,
       history: this.history.slice(-200),
       theta: Array.from(this.theta),
       uptime_ms: Date.now() - this.bornAt,
