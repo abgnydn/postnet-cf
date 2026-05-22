@@ -49,6 +49,15 @@ All four pages are independent Durable Objects sharing the same Cloudflare proje
 | 12 | Multi-seed empirical study | `9cf96fa` |
 | 13 | Attacker-count sweep — defense holds at 50% byzantine | `69ddc28` |
 | 14 | Sliding-window fraud detection (defends against patient attackers) | `f935e22` |
+| 15 | README polish | `d7aca33` |
+| 16 | Byzantine defense + WS push ported to Tournament | `f2742b6` |
+| 17 | Byzantine defense + WS push ported to Ternary | `02d58ab` |
+| 18 | Browser workers consume WS push (tournament + ternary) | `492ca66` |
+| 19 | Smoke-test runner + verifier retry logic | `5ecef4e` |
+| 20 | Protocol specification (`docs/PROTOCOL.md`) | `74ad6de` |
+| 21 | `scripts/expose.sh` — cloudflared quick tunnel | `3858e64` |
+| 22 | Trimmed-mean defense for federated Adam | `bc02682` |
+| 23 | Interactive byzantine demo on `/lm.html` | `b8e8e69` |
 
 Each phase ships a real change to the protocol or the demo and is documented either in `docs/` or in a per-phase commit message that includes the empirical result.
 
