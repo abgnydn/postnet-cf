@@ -14,11 +14,14 @@
  */
 import { DurableObject } from "cloudflare:workers";
 export { Tournament } from "./tournament";
+export { Ternary } from "./ternary";
 
 export interface Env {
   COORD: DurableObjectNamespace;
   TOURNAMENT: DurableObjectNamespace;
+  TERNARY: DurableObjectNamespace;
   ASSETS: Fetcher;
+  SNAPSHOTS: R2Bucket;
 }
 
 const H = 32;
@@ -235,6 +238,10 @@ export default {
     if (url.pathname.startsWith("/api/tournament/")) {
       const id = env.TOURNAMENT.idFromName("default");
       return env.TOURNAMENT.get(id).fetch(request);
+    }
+    if (url.pathname.startsWith("/api/ternary/")) {
+      const id = env.TERNARY.idFromName("default");
+      return env.TERNARY.get(id).fetch(request);
     }
     if (url.pathname.startsWith("/api/")) {
       const id = env.COORD.idFromName("default");

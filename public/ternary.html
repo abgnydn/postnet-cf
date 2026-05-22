@@ -3,13 +3,14 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Postnet × Cloudflare — federated ES demo</title>
+  <title>Postnet × Cloudflare — ternary tournament (Phase 4)</title>
   <style>
     :root {
       --ink: #1a1a1a;
       --paper: #fafaf7;
       --rule: #d4d2cc;
       --accent: #d6502c;
+      --accent2: #2c8a4f;
     }
     * { box-sizing: border-box; }
     body {
@@ -22,7 +23,19 @@
       line-height: 1.5;
     }
     h1 { font-weight: 700; margin: 0 0 4px; letter-spacing: -0.02em; }
-    .sub { color: #666; margin: 0 0 28px; font-size: 14px; }
+    .sub { color: #666; margin: 0 0 12px; font-size: 14px; }
+    .phase {
+      display: inline-block;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--accent2);
+      border: 1px solid var(--accent2);
+      padding: 2px 8px;
+      border-radius: 3px;
+      margin-bottom: 14px;
+    }
     .panel {
       border: 1px solid var(--rule);
       border-radius: 6px;
@@ -56,10 +69,7 @@
       margin-top: 16px;
     }
     .boundary-wrap {
-      display: flex;
-      gap: 18px;
-      margin-top: 16px;
-      align-items: flex-start;
+      display: flex; gap: 18px; margin-top: 16px; align-items: flex-start;
     }
     #boundary {
       border: 1px solid var(--rule);
@@ -82,21 +92,28 @@
       border-radius: 6px;
       margin-top: 12px;
     }
-    .note {
-      font-size: 12px;
-      color: #555;
-      margin-top: 12px;
-      line-height: 1.45;
-    }
+    .note { font-size: 12px; color: #555; margin-top: 12px; line-height: 1.45; }
     code { background: #efece4; padding: 1px 5px; border-radius: 3px; font-size: 12.5px; }
+    .nav { font-size: 12px; color: #666; margin-bottom: 18px; }
+    .nav a { color: var(--accent); text-decoration: none; }
+    .nav a:hover { text-decoration: underline; }
   </style>
 </head>
 <body>
-  <h1>Postnet × Cloudflare</h1>
-  <p class="sub">A 129-parameter 2D classifier trained by federated Adam across whatever browser tabs you open. Workers compute ∇L on local batches in JS; the Cloudflare Durable Object averages and steps. Switch the task from the dropdown to retrain the same architecture on a new objective. Two alternate protocols on the same task: <a href="/tournament.html" style="color:#d6502c;">float tournament →</a> · <a href="/ternary.html" style="color:#2c8a4f;">ternary tournament →</a></p>
+  <div class="nav"><a href="/">← federated Adam</a> · <a href="/tournament.html">← float tournament</a></div>
+  <span class="phase">Phase 4 · ternary weights</span>
+  <h1>Postnet × Cloudflare — ternary</h1>
+  <p class="sub">
+    Every weight is constrained to <code>{−1, 0, +1}</code> with a single
+    learned scale <code>S</code>. Workers propose ternary flips
+    (pick K positions, set each to a new value in <code>{−1, 0, +1}</code>),
+    score each on a private batch, submit the best. Snapshot is packed
+    2 bits per weight (<b>16× smaller than float32 at scale</b>).
+    Substrate test for plugging in a real BitNet b1.58 model as Phase 5.
+  </p>
 
   <div class="panel">
-    <button id="join">Join swarm</button>
+    <button id="join">Join ternary swarm</button>
     <button id="reset" class="secondary">Reset coordinator</button>
     <label style="margin-left:14px;font-size:13px;">
       task
@@ -109,31 +126,36 @@
     <div class="stats">
       <div class="stat"><label>worker</label><b id="wid">—</b></div>
       <div class="stat"><label>round</label><b id="round">—</b></div>
-      <div class="stat"><label>pool</label><b id="pool">—</b></div>
+      <div class="stat"><label>proposals</label><b id="pool">—</b></div>
       <div class="stat"><label>peers</label><b id="peers">—</b></div>
       <div class="stat"><label>test loss</label><b id="loss">—</b></div>
+      <div class="stat"><label>accept rate</label><b id="ar">—</b></div>
+      <div class="stat"><label>bandwidth</label><b id="bw">↑0 B ↓0 B</b></div>
     </div>
     <canvas id="chart" width="900" height="240"></canvas>
     <div class="boundary-wrap">
       <canvas id="boundary" width="320" height="320"></canvas>
       <div class="legend">
-        <p><b>Decision boundary, live.</b></p>
-        <p>Each pixel = the swarm's current θ run through the forward pass at that (x, y).
-        Color is the predicted probability of class 1. The thin black curve is the
-        ground truth: <code>sin(2x) &gt; y</code>. The model should bend into that wavy
-        shape as the swarm converges.</p>
-        <p style="color:#666;font-size:11px;margin-top:8px;">x, y ∈ [−2, 2] · 320×320 grid · forward pass at every pixel each round</p>
+        <p><b>Decision boundary.</b> Forward pass uses <code>sign[i] × scale</code>
+        for every weight. The boundary will be visibly coarser than the float
+        version because there are only 3<sup>P</sup> reachable weight
+        configurations.</p>
+        <p style="color:#666;font-size:11px;margin-top:8px;">
+          K = 8 trials · flip size = 6 positions · weights ∈ {−1, 0, +1}
+        </p>
       </div>
     </div>
     <div id="log">(idle)</div>
     <p class="note">
-      Open this page in <b>more tabs</b> (or send the URL to a friend) to add workers.
-      The coordinator (a Cloudflare Durable Object) averages every <code>2+</code> gradients
-      it gets and steps θ. Loss should plunge and the boundary should bend into the
-      wave within a few dozen rounds.
+      Accept rate is lower than the float tournament (typically 8–30% vs ~50%)
+      because the ternary search space is coarser — many proposed flips don't
+      beat the current state. Each accepted flip is a real, discrete improvement.
+      Snapshot at P = 129 is just <b>45 bytes</b> on the wire (12-byte header
+      + 33 bytes packed). At BitNet 2B (P = 1.5B), the same encoding ships
+      ~375 MB once via R2 and ~340 B/tick thereafter.
     </p>
   </div>
 
-  <script type="module" src="/worker.js"></script>
+  <script type="module" src="/ternary-worker.js"></script>
 </body>
 </html>

@@ -178,6 +178,22 @@ npx wrangler r2 bucket create postnet-snapshots
 
 The DO writes snapshots via `env.SNAPSHOTS.put(key, buf, ...)` and reads via `env.SNAPSHOTS.get(key)`. Response headers `x-snapshot-source: r2 | memory` make it easy to verify which path served the bytes.
 
+### Phase 4 — ternary weights
+
+Same flip-and-accept protocol but every weight is constrained to <code>{−1, 0, +1}</code> with a single learned scale `S`. Effective weight at index *i* is `sign[i] * scale`. Workers propose ternary flips (pick K positions, set each to a new value ≠ current), score, submit best. Substrate test for plugging in a real BitNet b1.58 model as Phase 5.
+
+UI at `/ternary.html`. New DO `Ternary` (migration v3); endpoints `/api/ternary/{tick,state,reset,set_task,snapshot,snapshot.bin}`.
+
+Snapshot wire format (packed):
+```
+[uint32 round][uint32 P][float32 scale][ceil(P*2/8) bytes packed]
+```
+Each ternary value packs into 2 bits: `00 = 0`, `01 = +1`, `10 = −1`. At `P = 129` the snapshot is **45 bytes** (vs 524 B for the float Tournament — 11.6× smaller). At BitNet 2B (`P = 1.5B`) the same encoding ships **~375 MB** once via R2 (vs ~6 GB float32 — 16× smaller).
+
+Headless verifier (`scripts/ternary-verifier.mjs`, 3 workers × 800 rounds): circle 0.34 △ · xor 0.31 △ · wave 0.30 △. Convergence stops short of the float Tournament's 0.07-0.21 because the ternary search space is genuinely coarser at P=129 — there are only 3^129 reachable weight configurations and a single scale. Accept rate drops to ~25% (vs ~50% for float) because many proposed flips don't beat the current state; each accepted flip is a discrete improvement.
+
+At BitNet 2B scale the same protocol drives 1.5 B ternary weights with the same ~340 B per-tick downlink. Phase 5 will swap the worker's local scorer for `fused-lora`'s WebGPU BitNet inference, keeping the protocol and DO unchanged.
+
 ## Open questions / future moves
 
 - **Real workload.** Swap the synthetic 2D classifier for `fusedx`'s `gpt-gradfree-engine.ts` or a TF.js MNIST model. Same coord, real ML compute.
