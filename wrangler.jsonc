@@ -11,7 +11,8 @@
     "bindings": [
       { "name": "COORD", "class_name": "Coord" },
       { "name": "TOURNAMENT", "class_name": "Tournament" },
-      { "name": "TERNARY", "class_name": "Ternary" }
+      { "name": "TERNARY", "class_name": "Ternary" },
+      { "name": "TOURNAMENT_LM", "class_name": "TournamentLM" }
     ]
   },
   "migrations": [
@@ -26,6 +27,10 @@
     {
       "tag": "v3",
       "new_sqlite_classes": ["Ternary"]
+    },
+    {
+      "tag": "v4",
+      "new_sqlite_classes": ["TournamentLM"]
     }
   ],
   "r2_buckets": [

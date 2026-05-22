@@ -192,7 +192,24 @@ Each ternary value packs into 2 bits: `00 = 0`, `01 = +1`, `10 = −1`. At `P = 
 
 Headless verifier (`scripts/ternary-verifier.mjs`, 3 workers × 800 rounds): circle 0.34 △ · xor 0.31 △ · wave 0.30 △. Convergence stops short of the float Tournament's 0.07-0.21 because the ternary search space is genuinely coarser at P=129 — there are only 3^129 reachable weight configurations and a single scale. Accept rate drops to ~25% (vs ~50% for float) because many proposed flips don't beat the current state; each accepted flip is a discrete improvement.
 
-At BitNet 2B scale the same protocol drives 1.5 B ternary weights with the same ~340 B per-tick downlink. Phase 5 will swap the worker's local scorer for `fused-lora`'s WebGPU BitNet inference, keeping the protocol and DO unchanged.
+At BitNet 2B scale the same protocol drives 1.5 B ternary weights with the same ~340 B per-tick downlink. Phase 6 will swap the worker's local scorer for `fused-lora`'s WebGPU BitNet inference, keeping the protocol and DO unchanged.
+
+### Phase 5 — char-LM (real ML task)
+
+Steps the substrate up from the 2D toy classifier to a real ML task: next-character prediction over a fixed 340-char toy passage. Architecture is a 27-vocab bigram: `embed (V × E) + linear (E × V) + bias (V)` = 27·16 + 16·27 + 27 = **891 params**. Loss = mean cross-entropy. Random-init loss ≈ `log(V) ≈ 3.30`.
+
+UI at `/lm.html`. New DO `TournamentLM` (migration v4); endpoints `/api/lm/{tick,state,reset,snapshot,snapshot.bin,sample}`. The `/sample` endpoint runs greedy + temperature decoding from the coord's current θ — handy for eyeballing convergence without joining a worker.
+
+Headless verifier (`scripts/lm-verifier.mjs`, 3 workers × 1500 rounds):
+
+| round | loss | accept rate | sample (60 chars from "t") |
+|---|---|---|---|
+| 0 | 3.29 | 0% | `"txhozciuicxcczuxhcziczhxhchnuczhczihcihzizixchch zuxczuxuxwi"` |
+| 400 | 2.23 | 50% | `"the the the the the the the the the the the the the the the "` |
+| 800 | 1.84 | 49% | `"the the the the the the the the the the the the the the the "` |
+| 1500 | 1.67 | 45% | `"the the the the the the the the the the the the the the the t"` |
+
+Loss drops monotonically from 3.29 → 1.67 driven entirely by federated flip-and-accept on a real ML loss surface (no gradients, no autograd). The mode collapse to "the the the…" is expected for a 1-char-context bigram — it has no notion that it just emitted the same word three times. Phase 6 (BitNet b1.58 via fused-lora) brings real context length and breaks out of the mode-collapse regime; the protocol stays the same.
 
 ## Open questions / future moves
 

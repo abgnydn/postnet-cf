@@ -15,11 +15,13 @@
 import { DurableObject } from "cloudflare:workers";
 export { Tournament } from "./tournament";
 export { Ternary } from "./ternary";
+export { TournamentLM } from "./tournament-lm";
 
 export interface Env {
   COORD: DurableObjectNamespace;
   TOURNAMENT: DurableObjectNamespace;
   TERNARY: DurableObjectNamespace;
+  TOURNAMENT_LM: DurableObjectNamespace;
   ASSETS: Fetcher;
   SNAPSHOTS: R2Bucket;
 }
@@ -242,6 +244,10 @@ export default {
     if (url.pathname.startsWith("/api/ternary/")) {
       const id = env.TERNARY.idFromName("default");
       return env.TERNARY.get(id).fetch(request);
+    }
+    if (url.pathname.startsWith("/api/lm/")) {
+      const id = env.TOURNAMENT_LM.idFromName("default");
+      return env.TOURNAMENT_LM.get(id).fetch(request);
     }
     if (url.pathname.startsWith("/api/")) {
       const id = env.COORD.idFromName("default");
