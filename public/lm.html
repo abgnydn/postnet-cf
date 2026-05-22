@@ -67,14 +67,13 @@
   <span class="phase">Phase 5 · char-LM</span>
   <h1>Postnet × Cloudflare — char-LM</h1>
   <p class="sub">
-    Real ML task: next-character prediction. Same flip-and-accept protocol as the
-    float/ternary tournaments, but the model is an 891-param bigram
-    (<code>embed V×E + linear E×V + bias</code> over a 27-char vocabulary).
-    Loss = mean cross-entropy across a 340-char toy passage; random init
-    starts at <code>log(V) ≈ 3.30</code>. Phase 6 ships sharded snapshots
-    (parallel R2 fetch). Phase 7 ships federated data shards — each browser
-    tab scores proposals on its own disjoint slice of the text, and the
-    coord aggregates flips to a shared model that fits the union.
+    Real ML task: next-character prediction. Phase 8 upgrades the model from
+    a mode-collapsing bigram to a <b>context-2 MLP</b>
+    (<code>embed V×E + fc1 2E×H + relu + fc2 H×V + biases</code>), 2 379
+    params total over a 27-char vocabulary. Phase 6 ships sharded R2 snapshots
+    (parallel fetch). Phase 7 ships federated data shards — each tab scores
+    on its private slice of the text; the shared model fits the union.
+    Random-init loss ≈ <code>log(V) ≈ 3.30</code>.
   </p>
 
   <div class="panel">
@@ -97,10 +96,11 @@
 
     <div id="log">(idle)</div>
     <p class="note">
-      P = 891 weights · K = 8 trials per worker · flip size = 6 params per proposal · σ = 0.15.
-      A converged 1-char-context model can't really beat ~1.5 nats — it has no memory of multi-char structure
-      and falls into mode-collapsed loops ("the the the…"). The proof-of-protocol is the loss curve from
-      3.3 → ~1.7 driven entirely by federated flip-and-accept on a real ML loss.
+      P = 2 379 weights · K = 8 trials per worker · flip size = 6 params per proposal · σ = 0.15.
+      The context-2 MLP escapes the bigram's "the the the" attractor — at R~1000 the sample
+      starts producing pseudo-words like "slin", "soge", "wh". Loss settles around 1.6 nats
+      driven entirely by federated flip-and-accept across data-sharded workers (Phase 7).
+      Phase 9 swaps the in-tab forward pass for a WebGPU one.
     </p>
   </div>
 

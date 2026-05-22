@@ -24,12 +24,18 @@ export interface Env {
   SNAPSHOTS: R2Bucket;
 }
 
+// Phase 8: context-2 MLP. Previous 2 chars → embed (shared) → concat → MLP → next char.
+// Architecture: embed(V × E) + fc1(2E × H) + b1(H) + fc2(H × V) + b2(V).
 const V = 27;             // a-z + space
-const E = 16;             // embed dim
-const P_EMBED = V * E;    // 432
-const P_OUT = E * V;      // 432
-const P_BIAS = V;         // 27
-const P = P_EMBED + P_OUT + P_BIAS;   // 891
+const E = 16;             // embed dim per position
+const HID = 32;           // hidden width
+const CTX = 2;            // context length (previous CTX chars predict the next)
+const P_EMBED = V * E;                  // 432
+const P_FC1 = CTX * E * HID;            // 1024
+const P_B1 = HID;                       // 32
+const P_FC2 = HID * V;                  // 864
+const P_B2 = V;                         // 27
+const P = P_EMBED + P_FC1 + P_B1 + P_FC2 + P_B2;   // 2379
 const TARGET_PROPOSALS = 2;
 const FLIP_SIZE = 6;
 const FLIP_SIGMA = 0.15;
@@ -72,17 +78,42 @@ function mulberry32(seed: number): () => number {
   };
 }
 
-function forward(theta: Float32Array, charIdx: number, outLogits: Float32Array): void {
-  // Embed: theta[0 ... V*E - 1] is V × E, row-major. embedding[c] = row c
-  const eStart = charIdx * E;
-  // Output: theta[V*E ... V*E + E*V - 1] is E × V, row-major.
-  // logits[v] = bias[v] + sum_i embed[i] * theta[P_EMBED + i*V + v]
-  for (let v = 0; v < V; v++) outLogits[v] = theta[P_EMBED + P_OUT + v];
+// Phase 8: context-2 forward.
+// theta layout:
+//   [0 .. P_EMBED)                      : embed (V × E)
+//   [P_EMBED .. P_EMBED + P_FC1)        : fc1 (2E × H), row-major (2E rows, H cols)
+//   [P_EMBED + P_FC1 .. + P_B1)         : b1 (H)
+//   [... .. + P_FC2)                    : fc2 (H × V)
+//   [... .. + P_B2)                     : b2 (V)
+const FC1_OFF = P_EMBED;
+const B1_OFF = FC1_OFF + P_FC1;
+const FC2_OFF = B1_OFF + P_B1;
+const B2_OFF = FC2_OFF + P_FC2;
+
+function forward(theta: Float32Array, prevPrev: number, prev: number, outLogits: Float32Array): void {
+  // Concat two embeddings to form a 2E-vector x
+  const x = new Float32Array(CTX * E);
   for (let i = 0; i < E; i++) {
-    const ei = theta[eStart + i];
-    for (let v = 0; v < V; v++) {
-      outLogits[v] += ei * theta[P_EMBED + i * V + v];
-    }
+    x[i] = theta[prevPrev * E + i];
+    x[E + i] = theta[prev * E + i];
+  }
+  // fc1: h_j = relu(b1_j + sum_i x_i * theta[FC1_OFF + i*H + j])
+  const h = new Float32Array(HID);
+  for (let j = 0; j < HID; j++) h[j] = theta[B1_OFF + j];
+  for (let i = 0; i < CTX * E; i++) {
+    const xi = x[i];
+    if (xi === 0) continue;
+    const row = FC1_OFF + i * HID;
+    for (let j = 0; j < HID; j++) h[j] += xi * theta[row + j];
+  }
+  for (let j = 0; j < HID; j++) if (h[j] < 0) h[j] = 0;
+  // fc2: logits[v] = b2_v + sum_j h_j * theta[FC2_OFF + j*V + v]
+  for (let v = 0; v < V; v++) outLogits[v] = theta[B2_OFF + v];
+  for (let j = 0; j < HID; j++) {
+    const hj = h[j];
+    if (hj === 0) continue;
+    const row = FC2_OFF + j * V;
+    for (let v = 0; v < V; v++) outLogits[v] += hj * theta[row + v];
   }
 }
 
@@ -90,17 +121,16 @@ function testLoss(theta: Float32Array): number {
   const logits = new Float32Array(V);
   let loss = 0;
   const eps = 1e-7;
-  for (let i = 0; i < CODES.length - 1; i++) {
-    forward(theta, CODES[i], logits);
-    // softmax + cross-entropy
+  for (let i = CTX; i < CODES.length; i++) {
+    forward(theta, CODES[i - 2], CODES[i - 1], logits);
     let mx = -Infinity;
     for (let v = 0; v < V; v++) if (logits[v] > mx) mx = logits[v];
     let sum = 0;
     for (let v = 0; v < V; v++) sum += Math.exp(logits[v] - mx);
-    const target = CODES[i + 1];
+    const target = CODES[i];
     loss += -(logits[target] - mx - Math.log(sum + eps));
   }
-  return loss / (CODES.length - 1);
+  return loss / (CODES.length - CTX);
 }
 
 interface Proposal {
@@ -207,7 +237,7 @@ export class TournamentLM extends DurableObject<Env> {
         });
       }
       return Response.json({
-        round, P, V, E,
+        round, P, V, E, HID, CTX,
         num_shards: numShards,
         shard_size_floats: FLOATS_PER_SHARD,
         shards,
@@ -283,20 +313,21 @@ export class TournamentLM extends DurableObject<Env> {
   }
 
   private sampleText(seedChar: string, n: number): string {
-    let c = charCode(seedChar);
+    let prevPrev = 0;   // start with space as context
+    let prev = charCode(seedChar);
     const logits = new Float32Array(V);
-    const out: number[] = [c];
+    const out: number[] = [prev];
     const rng = mulberry32(Date.now() & 0xFFFFFFFF);
     for (let k = 0; k < n; k++) {
-      forward(this.theta, c, logits);
-      // Greedy + small noise for variety
+      forward(this.theta, prevPrev, prev, logits);
       let mx = -Infinity, arg = 0;
       for (let v = 0; v < V; v++) {
         const score = logits[v] + (rng() - 0.5) * 0.3;
         if (score > mx) { mx = score; arg = v; }
       }
-      c = arg;
-      out.push(c);
+      prevPrev = prev;
+      prev = arg;
+      out.push(arg);
     }
     return out.map(k => k === 0 ? ' ' : String.fromCharCode(97 + k - 1)).join('');
   }
@@ -372,7 +403,7 @@ export class TournamentLM extends DurableObject<Env> {
 
     return Response.json({
       round: this.round,
-      P, V, E,
+      P, V, E, HID, CTX,
       flip_size: FLIP_SIZE,
       target: TARGET_PROPOSALS,
       proposals: this.proposalsReceived,
@@ -389,7 +420,7 @@ export class TournamentLM extends DurableObject<Env> {
   private summary() {
     return {
       round: this.round,
-      P, V, E,
+      P, V, E, HID, CTX,
       flip_size: FLIP_SIZE,
       target: TARGET_PROPOSALS,
       proposals: this.proposalsReceived,

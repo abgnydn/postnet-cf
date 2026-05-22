@@ -2,9 +2,18 @@
 // 3 workers each proposes K=8 random-Gaussian flips per round on
 // the 891-param next-char model and reports its best.
 
-const V = 27, E = 16;
-const P_EMBED = V * E, P_OUT = E * V, P_BIAS = V;
-const P = P_EMBED + P_OUT + P_BIAS;
+// Phase 8: context-2 MLP, must match server src/tournament-lm.ts
+const V = 27, E = 16, HID = 32, CTX = 2;
+const P_EMBED = V * E;
+const P_FC1 = CTX * E * HID;
+const P_B1 = HID;
+const P_FC2 = HID * V;
+const P_B2 = V;
+const P = P_EMBED + P_FC1 + P_B1 + P_FC2 + P_B2;   // 2379
+const FC1_OFF = P_EMBED;
+const B1_OFF = FC1_OFF + P_FC1;
+const FC2_OFF = B1_OFF + P_B1;
+const B2_OFF = FC2_OFF + P_FC2;
 const TRIALS = 8;
 const FLIP_SIZE = 6;
 const FLIP_SIGMA = 0.15;
@@ -45,14 +54,27 @@ function gaussian(rng) {
   return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
 }
 
-function forward(theta, charIdx, logits) {
-  const eStart = charIdx * E;
-  for (let v = 0; v < V; v++) logits[v] = theta[P_EMBED + P_OUT + v];
+function forward(theta, prevPrev, prev, logits) {
+  const x = new Float32Array(CTX * E);
   for (let i = 0; i < E; i++) {
-    const ei = theta[eStart + i];
-    for (let v = 0; v < V; v++) {
-      logits[v] += ei * theta[P_EMBED + i * V + v];
-    }
+    x[i] = theta[prevPrev * E + i];
+    x[E + i] = theta[prev * E + i];
+  }
+  const h = new Float32Array(HID);
+  for (let j = 0; j < HID; j++) h[j] = theta[B1_OFF + j];
+  for (let i = 0; i < CTX * E; i++) {
+    const xi = x[i];
+    if (xi === 0) continue;
+    const row = FC1_OFF + i * HID;
+    for (let j = 0; j < HID; j++) h[j] += xi * theta[row + j];
+  }
+  for (let j = 0; j < HID; j++) if (h[j] < 0) h[j] = 0;
+  for (let v = 0; v < V; v++) logits[v] = theta[B2_OFF + v];
+  for (let j = 0; j < HID; j++) {
+    const hj = h[j];
+    if (hj === 0) continue;
+    const row = FC2_OFF + j * V;
+    for (let v = 0; v < V; v++) logits[v] += hj * theta[row + v];
   }
 }
 
@@ -68,18 +90,18 @@ function shardForWorker(id) {
 function textLoss(theta, shardStart, shardEnd) {
   const logits = new Float32Array(V);
   let loss = 0;
-  const start = shardStart != null ? shardStart : 0;
+  const start = Math.max(shardStart != null ? shardStart : 0, CTX);
   const end = shardEnd != null ? shardEnd : CODES.length;
-  for (let i = start; i < end - 1; i++) {
-    forward(theta, CODES[i], logits);
+  for (let i = start; i < end; i++) {
+    forward(theta, CODES[i - 2], CODES[i - 1], logits);
     let mx = -Infinity;
     for (let v = 0; v < V; v++) if (logits[v] > mx) mx = logits[v];
     let sum = 0;
     for (let v = 0; v < V; v++) sum += Math.exp(logits[v] - mx);
-    const target = CODES[i + 1];
+    const target = CODES[i];
     loss += -(logits[target] - mx - Math.log(sum + 1e-7));
   }
-  return loss / Math.max(end - 1 - start, 1);
+  return loss / Math.max(end - start, 1);
 }
 
 function proposeFlip(theta, rng) {
