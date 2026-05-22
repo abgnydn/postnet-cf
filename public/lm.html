@@ -71,8 +71,10 @@
     float/ternary tournaments, but the model is an 891-param bigram
     (<code>embed V×E + linear E×V + bias</code> over a 27-char vocabulary).
     Loss = mean cross-entropy across a 340-char toy passage; random init
-    starts at <code>log(V) ≈ 3.30</code>. Same DO shape, same R2 snapshots.
-    Phase 6 swaps the worker's local scorer for a BitNet inference engine.
+    starts at <code>log(V) ≈ 3.30</code>. Phase 6 ships sharded snapshots
+    (parallel R2 fetch). Phase 7 ships federated data shards — each browser
+    tab scores proposals on its own disjoint slice of the text, and the
+    coord aggregates flips to a shared model that fits the union.
   </p>
 
   <div class="panel">

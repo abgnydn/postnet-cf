@@ -227,6 +227,22 @@ The point: the Cloudflare Worker response cap is 100 MB. At BitNet 2B scale (~28
 
 Response headers `x-snapshot-shard: K` and `x-snapshot-source: r2 | memory` make it easy to verify the right shard was returned from the right path.
 
+### Phase 7 — federated data shards (true FL)
+
+Up through Phase 6 every worker scored proposals on the **same** text (the full 340-char passage). Phase 7 splits the text across workers: each tab hashes its `workerId` to a deterministic disjoint slice and scores proposals only on its private shard. The coord still measures convergence on the **full** text — that's the metric that matters — but no individual worker has seen all the data.
+
+With 3 workers covering 3 disjoint shards (chars 0..112, 112..224, 224..336):
+
+```
+lm-alpha   → shard 0  [chars   0..112]
+lm-delta   → shard 1  [chars 112..224]
+lm-bravo   → shard 2  [chars 224..336]
+```
+
+Convergence on full text (3 workers × 1500 rounds): 3.27 → 1.94 (vs the centralized 1.67). Slightly worse because each worker's gradient estimate is noisier from only seeing 1/3 of the data — but the shared model still learns the union of the shards via federated flip-and-accept.
+
+This is real FL semantics: workers cannot see each other's data, the coord aggregates only the proposed *parameter updates*, and the global model fits the union of private datasets. Combined with Phase 2's delta-only broadcasts, a worker behind a hostile network can participate without ever revealing what it trained on — only the flips it proposed.
+
 ## Open questions / future moves
 
 - **Real workload.** Swap the synthetic 2D classifier for `fusedx`'s `gpt-gradfree-engine.ts` or a TF.js MNIST model. Same coord, real ML compute.

@@ -56,10 +56,21 @@ function forward(theta, charIdx, logits) {
   }
 }
 
-function textLoss(theta) {
+const NUM_SHARDS = 3;
+function shardForWorker(id) {
+  let h = 0;
+  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
+  const s = h % NUM_SHARDS;
+  const span = Math.floor(CODES.length / NUM_SHARDS);
+  return { start: s * span, end: s === NUM_SHARDS - 1 ? CODES.length : (s + 1) * span, idx: s };
+}
+
+function textLoss(theta, shardStart, shardEnd) {
   const logits = new Float32Array(V);
   let loss = 0;
-  for (let i = 0; i < CODES.length - 1; i++) {
+  const start = shardStart != null ? shardStart : 0;
+  const end = shardEnd != null ? shardEnd : CODES.length;
+  for (let i = start; i < end - 1; i++) {
     forward(theta, CODES[i], logits);
     let mx = -Infinity;
     for (let v = 0; v < V; v++) if (logits[v] > mx) mx = logits[v];
@@ -68,7 +79,7 @@ function textLoss(theta) {
     const target = CODES[i + 1];
     loss += -(logits[target] - mx - Math.log(sum + 1e-7));
   }
-  return loss / (CODES.length - 1);
+  return loss / Math.max(end - 1 - start, 1);
 }
 
 function proposeFlip(theta, rng) {
@@ -162,6 +173,8 @@ class Worker {
 async function runWorker(worker, stopAt) {
   await worker.bootstrap();
   const trial = new Float32Array(P);
+  const shard = shardForWorker(worker.id);
+  worker.shard = shard;
   while (true) {
     const pulled = await worker.tick();
     if (pulled.round >= stopAt) return;
@@ -170,13 +183,14 @@ async function runWorker(worker, stopAt) {
     const seed = ((worker.localRound + 1) * 1000003) ^
                  (worker.id.charCodeAt(0) * 31 + worker.id.charCodeAt(2));
     const rng = mulberry32(seed);
-    const lossBefore = textLoss(worker.localTheta);
+    // Phase 7: score only on this worker's private shard
+    const lossBefore = textLoss(worker.localTheta, shard.start, shard.end);
     let best = null;
     for (let t = 0; t < TRIALS; t++) {
       const { indices, values } = proposeFlip(worker.localTheta, rng);
       for (let i = 0; i < P; i++) trial[i] = worker.localTheta[i];
       for (let k = 0; k < indices.length; k++) trial[indices[k]] = values[k];
-      const lossAfter = textLoss(trial);
+      const lossAfter = textLoss(trial, shard.start, shard.end);
       const delta = lossAfter - lossBefore;
       if (!best || delta < best.delta) best = { indices, values, delta };
     }
@@ -192,7 +206,13 @@ async function runWorker(worker, stopAt) {
   console.log(`Random-init loss ≈ log(V) = ${Math.log(V).toFixed(3)}\n`);
 
   await fetch(`${COORD}/api/lm/reset`, { method: "POST" });
-  const workers = Array.from({ length: N_WORKERS }, (_, i) => new Worker(`lm-${i}`));
+  // Phase 7: hand-pick worker ids so we hit each shard exactly once
+  // alpha → shard 0, delta → shard 1, bravo → shard 2 (hand-picked for full coverage)
+  const workers = ["alpha", "delta", "bravo"].map(suffix => new Worker(`lm-${suffix}`));
+  for (const w of workers) {
+    const sh = shardForWorker(w.id);
+    console.log(`  ${w.id} → shard${sh.idx} [${sh.start}..${sh.end}]`);
+  }
   const running = workers.map(w => runWorker(w, ROUNDS));
   let lastShown = -1;
   const sampler = (async () => {

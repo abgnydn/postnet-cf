@@ -57,10 +57,26 @@ function forward(theta, charIdx, logits) {
   }
 }
 
-function textLoss(theta) {
+// Phase 7: federated data shards. Each worker hashes its workerId to pick
+// a deterministic disjoint slice of TEXT. The coord still reports loss on
+// the full text as the convergence metric, but proposal scoring uses only
+// the worker's private shard. Workers with different data can disagree
+// about which flip is best — that's the "federated" in federated learning.
+const NUM_SHARDS = 3;
+function shardForWorker(id) {
+  let h = 0;
+  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
+  const s = h % NUM_SHARDS;
+  const span = Math.floor(CODES.length / NUM_SHARDS);
+  return { start: s * span, end: s === NUM_SHARDS - 1 ? CODES.length : (s + 1) * span, idx: s };
+}
+
+function textLoss(theta, shardStart, shardEnd) {
   const logits = new Float32Array(V);
   let loss = 0;
-  for (let i = 0; i < CODES.length - 1; i++) {
+  const start = shardStart != null ? shardStart : 0;
+  const end = shardEnd != null ? shardEnd : CODES.length;
+  for (let i = start; i < end - 1; i++) {
     forward(theta, CODES[i], logits);
     let mx = -Infinity;
     for (let v = 0; v < V; v++) if (logits[v] > mx) mx = logits[v];
@@ -69,7 +85,7 @@ function textLoss(theta) {
     const target = CODES[i + 1];
     loss += -(logits[target] - mx - Math.log(sum + 1e-7));
   }
-  return loss / (CODES.length - 1);
+  return loss / Math.max(end - 1 - start, 1);
 }
 
 function proposeFlip(theta, rng) {
@@ -106,6 +122,7 @@ function sampleText(theta, seed, n) {
 
 // --- UI bindings ---
 const workerId = `lm-${Math.random().toString(36).slice(2, 8)}`;
+const myShard = shardForWorker(workerId);
 const $ = (id) => document.getElementById(id);
 const widEl = $("wid"), roundEl = $("round"), poolEl = $("pool");
 const peersEl = $("peers"), lossEl = $("loss"), arEl = $("ar");
@@ -287,13 +304,14 @@ async function runForever() {
 
       const seed = ((localRound + 1) * 1000003) ^ (workerId.charCodeAt(0) * 31 + workerId.charCodeAt(2));
       const rng = mulberry32(seed);
-      const lossBefore = textLoss(localTheta);
+      // Phase 7: score only on this worker's private text shard
+      const lossBefore = textLoss(localTheta, myShard.start, myShard.end);
       let best = null;
       for (let t = 0; t < TRIALS_PER_REPORT; t++) {
         const { indices, values } = proposeFlip(localTheta, rng);
         for (let i = 0; i < P; i++) trial[i] = localTheta[i];
         for (let k = 0; k < indices.length; k++) trial[indices[k]] = values[k];
-        const lossAfter = textLoss(trial);
+        const lossAfter = textLoss(trial, myShard.start, myShard.end);
         const delta = lossAfter - lossBefore;
         if (!best || delta < best.delta) best = { indices, values, delta };
       }
@@ -319,7 +337,7 @@ joinBtn.addEventListener("click", () => {
   running = true;
   joinBtn.disabled = true;
   joinBtn.textContent = "Joined";
-  log(`Joining as ${workerId}`);
+  log(`Joining as ${workerId} · shard${myShard.idx} [${myShard.start}..${myShard.end}] of ${CODES.length}`);
   pullState();
   runForever();
 });
