@@ -96,7 +96,7 @@ export class Coord extends DurableObject<Env> {
   private pool: Float32Array[] = [];
   private joined = new Set<string>();
   private lastLoss = -1;
-  private history: { round: number; loss: number; n: number; ts: number }[] = [];
+  private history: { round: number; loss: number; n: number; dropped?: number; trimmed_norm?: number; ts: number }[] = [];
   private bornAt = Date.now();
 
   constructor(state: DurableObjectState, env: Env) {
@@ -172,12 +172,30 @@ export class Coord extends DurableObject<Env> {
 
     let advanced = false;
     if (this.pool.length >= TARGET_GRADIENTS) {
-      // Average all gradients in the pool
+      // Phase 22: byzantine-resistant aggregation via trimmed mean.
+      // Compute L2 norm of each gradient; drop the single most-extreme
+      // (largest norm) gradient before averaging. With TARGET=2 this
+      // would always drop one and average the other — too lenient.
+      // So: only trim when pool size > 2; otherwise plain mean.
+      const norms = this.pool.map(gi => {
+        let s = 0;
+        for (let i = 0; i < P; i++) s += gi[i] * gi[i];
+        return Math.sqrt(s);
+      });
+      let usedPool = this.pool;
+      let trimmedNorm = -1;
+      if (this.pool.length > 2) {
+        // Drop the single most extreme — index of max norm
+        let maxIdx = 0;
+        for (let i = 1; i < norms.length; i++) if (norms[i] > norms[maxIdx]) maxIdx = i;
+        trimmedNorm = norms[maxIdx];
+        usedPool = this.pool.filter((_, i) => i !== maxIdx);
+      }
       const g = new Float32Array(P);
-      for (const gi of this.pool) {
+      for (const gi of usedPool) {
         for (let i = 0; i < P; i++) g[i] += gi[i];
       }
-      for (let i = 0; i < P; i++) g[i] /= this.pool.length;
+      for (let i = 0; i < P; i++) g[i] /= usedPool.length;
       // Adam: m ← β1·m + (1-β1)·g ; v ← β2·v + (1-β2)·g² ; bias-correct ; θ ← θ - lr·m̂/(√v̂+ε)
       this.adamStep += 1;
       const bc1 = 1 - Math.pow(ADAM_B1, this.adamStep);
@@ -191,10 +209,11 @@ export class Coord extends DurableObject<Env> {
         next[i] = this.theta[i] - LR * mHat / (Math.sqrt(vHat) + ADAM_EPS);
       }
       this.theta = next;
-      const used = this.pool.length;
+      const used = usedPool.length;
+      const dropped = this.pool.length - used;
       this.pool = [];
       this.lastLoss = testLoss(this.theta, this.task);
-      this.history.push({ round: this.round, loss: this.lastLoss, n: used, ts: Date.now() });
+      this.history.push({ round: this.round, loss: this.lastLoss, n: used, dropped, trimmed_norm: trimmedNorm, ts: Date.now() });
       if (this.history.length > 500) this.history.splice(0, this.history.length - 500);
       this.round += 1;
       advanced = true;
