@@ -199,8 +199,35 @@ async function trackedFetch(url, init) {
   return JSON.parse(text);
 }
 
+// Phase 33: localStorage cache for theta. Revisits skip the full snapshot
+// fetch and resume from the cached round; coord ships deltas via applied_since.
+const CACHE_KEY = "postnet.lm.theta.v1";
+
+function loadCachedTheta() {
+  try {
+    const raw = localStorage.getItem(CACHE_KEY);
+    if (!raw) return null;
+    const { round, theta } = JSON.parse(raw);
+    if (typeof round !== "number" || !Array.isArray(theta) || theta.length !== P) return null;
+    return { round, theta: new Float32Array(theta) };
+  } catch { return null; }
+}
+function saveCachedTheta(round, theta) {
+  try {
+    localStorage.setItem(CACHE_KEY, JSON.stringify({ round, theta: Array.from(theta) }));
+  } catch {}
+}
+
 async function bootstrap() {
-  // Phase 6: snapshot is sharded. Manifest lists N shards; we fetch all in parallel.
+  // Phase 33: try cache first
+  const cached = loadCachedTheta();
+  if (cached) {
+    localTheta = cached.theta;
+    localRound = cached.round;
+    log(`bootstrap from localStorage @ R${cached.round} (no network)`);
+    return null;
+  }
+  // Phase 6: full sharded fetch
   const t0 = performance.now();
   const meta = await trackedFetch("/api/lm/snapshot");
   if (!Array.isArray(meta.shards)) throw new Error("no shards in manifest");
@@ -213,7 +240,6 @@ async function bootstrap() {
   }));
   updateBwStat();
   buffers.sort((a, b) => a.shard - b.shard);
-  // First shard carries header; the rest are raw floats
   const head = buffers[0];
   const headView = new DataView(head.buf);
   const round = headView.getUint32(0, true);
@@ -226,6 +252,7 @@ async function bootstrap() {
     localTheta.set(floats, start);
   }
   localRound = round;
+  saveCachedTheta(round, localTheta);
   const ms = (performance.now() - t0).toFixed(0);
   const totalBytes = buffers.reduce((a, b) => a + b.buf.byteLength, 0);
   log(`bootstrap @ R${round} via ${buffers.length} shards · ${totalBytes} B · ${ms}ms`);
@@ -409,6 +436,8 @@ async function runForever() {
         const mode = readAttackFlag() ? " [attacker]" : "";
         log(`R${localRound - 1} → R${localRound} · Δ ${best.delta.toFixed(4)} · loss ${reported.last_loss.toFixed(4)}${mode}`);
         if (localRound % 25 === 0) updateSample();
+        // Phase 33: periodically refresh the cached theta
+        if (localRound % 50 === 0) saveCachedTheta(localRound, localTheta);
       } else if (reported.rejected) {
         log(`stale @ R${localRound}`);
       }
@@ -432,6 +461,7 @@ joinBtn.addEventListener("click", () => {
 resetBtn.addEventListener("click", async () => {
   if (!confirm("Reset LM coordinator? All progress lost.")) return;
   await fetch("/api/lm/reset", { method: "POST" });
+  try { localStorage.removeItem(CACHE_KEY); } catch {}
   history = [];
   localTheta = null;
   localRound = -1;
@@ -439,7 +469,7 @@ resetBtn.addEventListener("click", async () => {
   updateBwStat();
   drawChart();
   if (sampleEl) sampleEl.textContent = "(idle)";
-  log("reset");
+  log("reset (cache cleared)");
 });
 
 pullState();
