@@ -73,6 +73,21 @@ A determined attacker that gets through the 10-win burn-in window applies severa
 
 Open question: what does "rewind θ" mean when many other honest flips have been applied since the bad one? Strict rewind loses honest work. Best plausible answer: maintain a "before-flip" snapshot for the last K applied flips so any one of them can be reverted; if older fraud is detected, accept the loss and let training continue.
 
+## Production free-tier quotas (real finding from deploy day)
+
+The first day's deploy burned through Cloudflare's Durable Objects free-tier daily request quota. Symptom: every `/api/*` endpoint returns 500 with `error code: 1101`, and `wrangler tail` shows `Error: Exceeded allowed volume of requests in Durable Objects free tier.` The quota resets the following UTC day.
+
+Concrete numbers from this deploy:
+- 4 DO classes, each instantiated for the lifetime of every tick
+- Headless verifiers issue ~6 requests/round/worker × 3 workers × 400 rounds × 3 tasks ≈ **21 600 DO requests per verifier run**
+- Multiple empirical-study runs + browser-tab activity over a session adds up fast
+- DO free-tier cap is **1M requests/day**, and we hit it after ~3 sustained verifier sessions
+
+Implications:
+- The deploy is genuinely public-usable for a handful of browser-tab demos. It is **not** usable for sustained empirical sweeps without upgrading to the paid plan ($5/month for Workers Paid covers ~1M extra DO requests, plus per-million pricing thereafter).
+- For research empirical studies, prefer `wrangler dev` locally (notwithstanding its instability under heavy multi-verifier load — see Phase 19 caveat) or a paid CF account.
+- Adding worker-side request batching (one HTTP POST carrying K rounds of proposals) would reduce request count linearly. Not implemented; a high-value optimization for the next deploy.
+
 ## What this work doesn't claim
 
 - It is **not a competitive language model**. The 2 379-param char-LM on 340-char text demonstrates the protocol, not the model quality.
