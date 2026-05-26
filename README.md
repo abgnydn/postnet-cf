@@ -60,6 +60,16 @@ All four pages are independent Durable Objects sharing the same Cloudflare proje
 | 21 | `scripts/expose.sh` — cloudflared quick tunnel | `3858e64` |
 | 22 | Trimmed-mean defense for federated Adam | `bc02682` |
 | 23 | Interactive byzantine demo on `/lm.html` | `b8e8e69` |
+| 24 | README phase table caught up to phase 23 | `8b403a7` |
+| 25 | arXiv-style paper draft (`docs/PAPER_DRAFT.md`) | `db3a78c` |
+| 26 | **DEPLOYED** to `*.workers.dev` | `39b5bbd` |
+| 27 | README deploy section — R2 prerequisite | `58ba265` |
+| 28 | `docs/OPEN_QUESTIONS.md` — research-direction inventory | `8e59a8b` |
+| 29 | `docs/README.md` — doc-folder entry point | `1228723` |
+| 30 | `CLAUDE.md` with `Resume here` block for future sessions | `98d6d89` |
+| 31 | Tiered fraud-detection windows (defends against patient-patient attackers) | `c19fddf` |
+| 32 | Production finding: DO free-tier daily quota | `35a2c70` |
+| 33 | localStorage-cached bootstrap for char-LM | `dd723ae` |
 
 Each phase ships a real change to the protocol or the demo and is documented either in `docs/` or in a per-phase commit message that includes the empirical result.
 
