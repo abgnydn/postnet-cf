@@ -142,9 +142,16 @@ npx wrangler dev --port 8787
 ## Deploy
 
 ```bash
+# One-time: create the R2 buckets the wrangler.jsonc binding references
+npx wrangler r2 bucket create postnet-snapshots
+npx wrangler r2 bucket create postnet-snapshots-preview
+
+# Then:
 npx wrangler deploy
 # → CF gives you a *.workers.dev URL; share with a friend, they become a worker
 ```
+
+Total upload is ~50 KB (gzip 8 KB) including all 4 demos, 4 DO classes, and dashboard. The deploy works on the Cloudflare free tier — DOs, R2, and Workers all have generous free quotas for a demo of this size. Production handles aggressive verifier load that `wrangler dev` can't sustain.
 
 ## File layout
 
