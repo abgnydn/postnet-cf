@@ -1,5 +1,7 @@
 # postnet-cf
 
+**Live demo:** https://postnet-cf.abgunaydin94.workers.dev — open in two browser tabs to see the swarm form.
+
 Federated learning where workers are browser tabs and the coordinator is a Cloudflare Durable Object. Four protocol variants share the substrate — federated Adam, float-weight tournament, ternary-weight tournament, and a real-ML char-LM with sliding-window byzantine defense.
 
 ```bash
