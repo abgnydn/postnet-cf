@@ -2,7 +2,13 @@
  * Browser worker — Phase 5 char-LM tournament.
  * Float-weight bigram model: embed (V×E) + linear (E×V) + bias (V).
  * Same flip-and-accept protocol as Phase 2/3 Tournament.
+ *
+ * Phase 35: scoring path is async + pluggable. Workers with WebGPU run the
+ * forward pass on the GPU (lm-webgpu-scorer.js); everyone else runs the JS
+ * textLoss() below. The two backends agree within ~1e-5.
  */
+
+import { createWebGPUScorer } from "./lm-webgpu-scorer.js";
 
 // Phase 8: context-2 MLP. P = 2379. Must match server src/tournament-lm.ts
 const V = 27, E = 16, HID = 32, CTX = 2;
@@ -175,6 +181,22 @@ let bytesUp = 0, bytesDown = 0;
 // Phase 10: WebSocket push
 let ws = null;
 let wsConnected = false;
+// Phase 35: pluggable scorer ({ textLoss: async fn, backend: "webgpu"|"js" })
+let scorer = null;
+
+async function initScorer() {
+  const gpu = await createWebGPUScorer(CODES);
+  if (gpu) {
+    scorer = gpu;
+    log("scorer: WebGPU");
+  } else {
+    scorer = {
+      async textLoss(theta, start, end) { return textLoss(theta, start, end); },
+      backend: "js",
+    };
+    log("scorer: JS (no WebGPU)");
+  }
+}
 
 function log(s) {
   const stamp = new Date().toLocaleTimeString();
@@ -395,6 +417,7 @@ function renderBoundaryNoop() {}  // hook for future renderBoundary() integratio
 
 async function runForever() {
   await bootstrap();
+  await initScorer();
   openWebSocket();
   const trial = new Float32Array(P);
   while (running) {
@@ -415,13 +438,13 @@ async function runForever() {
         best = { indices, values, delta: -10 };
       } else {
         // Phase 7: score only on this worker's private text shard
-        const lossBefore = textLoss(localTheta, myShard.start, myShard.end);
+        const lossBefore = await scorer.textLoss(localTheta, myShard.start, myShard.end);
         best = null;
         for (let t = 0; t < TRIALS_PER_REPORT; t++) {
           const { indices, values } = proposeFlip(localTheta, rng);
           for (let i = 0; i < P; i++) trial[i] = localTheta[i];
           for (let k = 0; k < indices.length; k++) trial[indices[k]] = values[k];
-          const lossAfter = textLoss(trial, myShard.start, myShard.end);
+          const lossAfter = await scorer.textLoss(trial, myShard.start, myShard.end);
           const delta = lossAfter - lossBefore;
           if (!best || delta < best.delta) best = { indices, values, delta };
         }

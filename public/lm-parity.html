@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>postnet-cf — char-LM scorer parity (Phase 35)</title>
+  <style>
+    body { font: 14px/1.5 -apple-system, system-ui, sans-serif; max-width: 720px; margin: 40px auto; padding: 0 24px; color: #1a1a1a; background: #fafaf7; }
+    h1 { margin: 0 0 4px; }
+    .sub { color: #666; margin: 0 0 18px; }
+    button { font: inherit; font-weight: 600; padding: 8px 16px; border: 1px solid #1a1a1a; background: #1a1a1a; color: #fafaf7; border-radius: 5px; cursor: pointer; }
+    pre { font: 12.5px/1.5 ui-monospace, "SF Mono", Menlo, monospace; background: #1a1a1a; color: #e3e3da; padding: 14px; border-radius: 6px; white-space: pre-wrap; }
+    .ok { color: #6fdc6f; }
+    .fail { color: #ff6b6b; }
+  </style>
+</head>
+<body>
+  <h1>char-LM scorer parity</h1>
+  <p class="sub">Compares <code>textLoss()</code> on the JS path vs the WebGPU path across N random θ vectors. Phase 35 acceptance: max |Δ| &lt; 1e-4 and WebGPU is measurably faster.</p>
+  <p><button id="run">Run parity (256 trials)</button></p>
+  <pre id="out">(idle)</pre>
+
+  <script type="module">
+    import { createWebGPUScorer } from "./lm-webgpu-scorer.js";
+
+    // Constants must match lm-worker.js / src/tournament-lm.ts
+    const V = 27, E = 16, HID = 32, CTX = 2;
+    const P_EMBED = V * E;
+    const P_FC1 = CTX * E * HID;
+    const P_B1 = HID;
+    const P_FC2 = HID * V;
+    const P_B2 = V;
+    const P = P_EMBED + P_FC1 + P_B1 + P_FC2 + P_B2; // 2379
+    const FC1_OFF = P_EMBED;
+    const B1_OFF = FC1_OFF + P_FC1;
+    const FC2_OFF = B1_OFF + P_B1;
+    const B2_OFF = FC2_OFF + P_FC2;
+
+    const TEXT =
+      "the bird sings every dawn the cat sleeps in the sun the dog runs to the park " +
+      "the wind blows the leaves the rain falls in the night the moon shines bright " +
+      "above the mountains rise high and the river flows fast through the woods and " +
+      "over the stones to the wide open sea where the waves break and roll back " +
+      "again and again forever and ever";
+
+    function charCode(c) {
+      if (c === ' ') return 0;
+      const k = c.charCodeAt(0) - 97;
+      return k >= 0 && k < 26 ? k + 1 : 0;
+    }
+    const CODES = new Uint8Array(TEXT.length);
+    for (let i = 0; i < TEXT.length; i++) CODES[i] = charCode(TEXT[i]);
+
+    function forward(theta, prevPrev, prev, logits) {
+      const x = new Float32Array(CTX * E);
+      for (let i = 0; i < E; i++) {
+        x[i] = theta[prevPrev * E + i];
+        x[E + i] = theta[prev * E + i];
+      }
+      const h = new Float32Array(HID);
+      for (let j = 0; j < HID; j++) h[j] = theta[B1_OFF + j];
+      for (let i = 0; i < CTX * E; i++) {
+        const xi = x[i]; if (xi === 0) continue;
+        const row = FC1_OFF + i * HID;
+        for (let j = 0; j < HID; j++) h[j] += xi * theta[row + j];
+      }
+      for (let j = 0; j < HID; j++) if (h[j] < 0) h[j] = 0;
+      for (let v = 0; v < V; v++) logits[v] = theta[B2_OFF + v];
+      for (let j = 0; j < HID; j++) {
+        const hj = h[j]; if (hj === 0) continue;
+        const row = FC2_OFF + j * V;
+        for (let v = 0; v < V; v++) logits[v] += hj * theta[row + v];
+      }
+    }
+    function textLossJS(theta, start, end) {
+      const logits = new Float32Array(V);
+      const s = Math.max(start, CTX);
+      const e = end;
+      let loss = 0;
+      for (let i = s; i < e; i++) {
+        forward(theta, CODES[i - 2], CODES[i - 1], logits);
+        let mx = -Infinity;
+        for (let v = 0; v < V; v++) if (logits[v] > mx) mx = logits[v];
+        let sum = 0;
+        for (let v = 0; v < V; v++) sum += Math.exp(logits[v] - mx);
+        const t = CODES[i];
+        loss += -(logits[t] - mx - Math.log(sum + 1e-7));
+      }
+      return loss / Math.max(e - s, 1);
+    }
+
+    function randomTheta(seed) {
+      // mulberry32 → standard-normal-ish via Box-Muller (cheap)
+      let s = seed >>> 0;
+      const rng = () => {
+        s = (s + 0x6D2B79F5) >>> 0;
+        let r = s;
+        r = Math.imul(r ^ (r >>> 15), r | 1);
+        r ^= r + Math.imul(r ^ (r >>> 7), r | 61);
+        return ((r ^ (r >>> 14)) >>> 0) / 4294967296;
+      };
+      const theta = new Float32Array(P);
+      for (let i = 0; i < P; i++) {
+        let u = 0, v = 0;
+        while (u === 0) u = rng();
+        while (v === 0) v = rng();
+        theta[i] = Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v) * 0.1;
+      }
+      return theta;
+    }
+
+    const out = document.getElementById("out");
+    function w(s) { out.textContent += s + "\n"; }
+
+    document.getElementById("run").addEventListener("click", async () => {
+      out.textContent = "";
+      const gpu = await createWebGPUScorer(CODES);
+      if (!gpu) { w("⚠ WebGPU unavailable — parity test needs both backends"); return; }
+      w("✓ WebGPU scorer initialized");
+
+      // Warm up both backends once (first GPU dispatch pays pipeline cost)
+      const warm = randomTheta(1);
+      await gpu.textLoss(warm, 0, CODES.length);
+      textLossJS(warm, 0, CODES.length);
+
+      const N = 256;
+      let maxAbs = 0, sumAbs = 0;
+      let tJS = 0, tGPU = 0;
+      const shardSpans = [
+        [0, CODES.length],
+        [0, Math.floor(CODES.length / 3)],
+        [Math.floor(CODES.length / 3), Math.floor(2 * CODES.length / 3)],
+        [Math.floor(2 * CODES.length / 3), CODES.length],
+      ];
+
+      for (let n = 0; n < N; n++) {
+        const theta = randomTheta(n + 17);
+        const [s, e] = shardSpans[n % shardSpans.length];
+
+        const t0 = performance.now();
+        const lj = textLossJS(theta, s, e);
+        tJS += performance.now() - t0;
+
+        const t1 = performance.now();
+        const lg = await gpu.textLoss(theta, s, e);
+        tGPU += performance.now() - t1;
+
+        const d = Math.abs(lj - lg);
+        if (d > maxAbs) maxAbs = d;
+        sumAbs += d;
+
+        if (n < 4 || d > 1e-4) {
+          w(`n=${n} shard=[${s}..${e}] js=${lj.toFixed(6)} gpu=${lg.toFixed(6)} |Δ|=${d.toExponential(2)}`);
+        }
+      }
+      const meanAbs = sumAbs / N;
+      const ok = maxAbs < 1e-4;
+      w("");
+      w(`trials:   ${N}`);
+      w(`mean |Δ|: ${meanAbs.toExponential(3)}`);
+      w(`max  |Δ|: ${maxAbs.toExponential(3)}  ${ok ? "✓ parity ok (<1e-4)" : "✗ PARITY FAIL"}`);
+      w(`time JS:  ${tJS.toFixed(1)} ms total · ${(tJS / N).toFixed(2)} ms/call`);
+      w(`time GPU: ${tGPU.toFixed(1)} ms total · ${(tGPU / N).toFixed(2)} ms/call`);
+      w(`speedup:  ${(tJS / tGPU).toFixed(2)}×`);
+      gpu.dispose();
+    });
+  </script>
+</body>
+</html>
