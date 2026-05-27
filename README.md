@@ -74,6 +74,7 @@ All four pages are independent Durable Objects sharing the same Cloudflare proje
 | 35 | WebGPU substrate for char-LM scorer (`public/lm-webgpu-scorer.js` + parity test) | _uncommitted_ |
 | 36 | SPSA tournament char-LM (DeComFL fusion; tournament-spsa-lm DO + worker) | _uncommitted_ |
 | 37 | Scaling crossover empirical — SPSA wins past P ~ 30K (see `docs/PHASE_37_SCALING.md`) | _uncommitted_ |
+| 38 | Federated head-classifier on real MiniLM features — SPSA outperforms flip-and-accept at P=50K, real downstream task (see `docs/PHASE_38_HEAD.md`) | _uncommitted_ |
 
 Each phase ships a real change to the protocol or the demo and is documented either in `docs/` or in a per-phase commit message that includes the empirical result.
 
