@@ -16,12 +16,18 @@ import { DurableObject } from "cloudflare:workers";
 export { Tournament } from "./tournament";
 export { Ternary } from "./ternary";
 export { TournamentLM } from "./tournament-lm";
+export { TournamentSpsaLM } from "./tournament-spsa-lm";
+export { TournamentLMBig } from "./tournament-lm-big";
+export { TournamentSpsaLMBig } from "./tournament-spsa-lm-big";
 
 export interface Env {
   COORD: DurableObjectNamespace;
   TOURNAMENT: DurableObjectNamespace;
   TERNARY: DurableObjectNamespace;
   TOURNAMENT_LM: DurableObjectNamespace;
+  TOURNAMENT_SPSA_LM: DurableObjectNamespace;
+  TOURNAMENT_LM_BIG: DurableObjectNamespace;
+  TOURNAMENT_SPSA_LM_BIG: DurableObjectNamespace;
   ASSETS: Fetcher;
   SNAPSHOTS: R2Bucket;
 }
@@ -267,6 +273,18 @@ export default {
     if (url.pathname.startsWith("/api/lm/")) {
       const id = env.TOURNAMENT_LM.idFromName("default");
       return env.TOURNAMENT_LM.get(id).fetch(request);
+    }
+    if (url.pathname.startsWith("/api/spsa-lm/")) {
+      const id = env.TOURNAMENT_SPSA_LM.idFromName("default");
+      return env.TOURNAMENT_SPSA_LM.get(id).fetch(request);
+    }
+    if (url.pathname.startsWith("/api/lm-big/")) {
+      const id = env.TOURNAMENT_LM_BIG.idFromName("default");
+      return env.TOURNAMENT_LM_BIG.get(id).fetch(request);
+    }
+    if (url.pathname.startsWith("/api/spsa-lm-big/")) {
+      const id = env.TOURNAMENT_SPSA_LM_BIG.idFromName("default");
+      return env.TOURNAMENT_SPSA_LM_BIG.get(id).fetch(request);
     }
     if (url.pathname.startsWith("/api/")) {
       const id = env.COORD.idFromName("default");

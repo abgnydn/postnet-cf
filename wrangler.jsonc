@@ -12,7 +12,10 @@
       { "name": "COORD", "class_name": "Coord" },
       { "name": "TOURNAMENT", "class_name": "Tournament" },
       { "name": "TERNARY", "class_name": "Ternary" },
-      { "name": "TOURNAMENT_LM", "class_name": "TournamentLM" }
+      { "name": "TOURNAMENT_LM", "class_name": "TournamentLM" },
+      { "name": "TOURNAMENT_SPSA_LM", "class_name": "TournamentSpsaLM" },
+      { "name": "TOURNAMENT_LM_BIG", "class_name": "TournamentLMBig" },
+      { "name": "TOURNAMENT_SPSA_LM_BIG", "class_name": "TournamentSpsaLMBig" }
     ]
   },
   "migrations": [
@@ -31,6 +34,14 @@
     {
       "tag": "v4",
       "new_sqlite_classes": ["TournamentLM"]
+    },
+    {
+      "tag": "v5",
+      "new_sqlite_classes": ["TournamentSpsaLM"]
+    },
+    {
+      "tag": "v6",
+      "new_sqlite_classes": ["TournamentLMBig", "TournamentSpsaLMBig"]
     }
   ],
   "r2_buckets": [

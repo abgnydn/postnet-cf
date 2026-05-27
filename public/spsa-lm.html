@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Postnet × Cloudflare — char-LM SPSA tournament (Phase 36)</title>
+  <style>
+    :root { --ink: #1a1a1a; --paper: #fafaf7; --rule: #d4d2cc; --accent: #d6502c; --accent3: #6a4cb0; }
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", system-ui, sans-serif;
+      max-width: 880px; margin: 40px auto; padding: 0 24px;
+      color: var(--ink); background: var(--paper); line-height: 1.5;
+    }
+    h1 { font-weight: 700; margin: 0 0 4px; letter-spacing: -0.02em; }
+    .sub { color: #666; margin: 0 0 12px; font-size: 14px; }
+    .phase {
+      display: inline-block; font-size: 11px; font-weight: 700;
+      letter-spacing: 0.08em; text-transform: uppercase;
+      color: var(--accent3); border: 1px solid var(--accent3);
+      padding: 2px 8px; border-radius: 3px; margin-bottom: 14px;
+    }
+    .panel { border: 1px solid var(--rule); border-radius: 6px; padding: 16px; margin: 16px 0; background: #fff; }
+    button {
+      font: inherit; font-weight: 600; padding: 9px 18px;
+      border: 1px solid var(--ink); background: var(--ink); color: var(--paper);
+      border-radius: 5px; cursor: pointer;
+    }
+    button:disabled { background: #999; border-color: #999; cursor: default; }
+    button.secondary { background: var(--paper); color: var(--ink); }
+    .stats { display: flex; flex-wrap: wrap; gap: 18px; font-size: 14px; margin-top: 12px; }
+    .stat { font-variant-numeric: tabular-nums; }
+    .stat label { color: #666; margin-right: 6px; }
+    .stat b { font-weight: 600; }
+    #chart {
+      width: 100%; height: 240px; display: block;
+      background: #fff; border: 1px solid var(--rule); border-radius: 6px;
+      margin-top: 16px;
+    }
+    #sample {
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 13px; line-height: 1.55;
+      padding: 14px; margin-top: 16px;
+      background: #fcfaf3; border: 1px solid var(--rule); border-radius: 6px;
+      min-height: 70px; white-space: pre-wrap; word-break: break-word;
+    }
+    #log {
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 12px; white-space: pre; height: 180px; overflow-y: auto;
+      padding: 12px; background: #1a1a1a; color: #e3e3da;
+      border-radius: 6px; margin-top: 12px;
+    }
+    .note { font-size: 12px; color: #555; margin-top: 12px; line-height: 1.45; }
+    code { background: #efece4; padding: 1px 5px; border-radius: 3px; font-size: 12.5px; }
+    .nav { font-size: 12px; color: #666; margin-bottom: 18px; }
+    .nav a { color: var(--accent); text-decoration: none; }
+    .nav a:hover { text-decoration: underline; }
+    .text-preview {
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 12px; color: #888; padding: 8px 12px;
+      background: #f4f1e8; border-radius: 4px; margin-top: 8px;
+    }
+  </style>
+</head>
+<body>
+  <div class="nav">
+    <a href="/">← federated Adam</a> ·
+    <a href="/tournament.html">float tournament</a> ·
+    <a href="/ternary.html">ternary tournament</a> ·
+    <a href="/lm.html">char-LM (flip-and-accept)</a>
+  </div>
+  <span class="phase">Phase 36 · char-LM SPSA</span>
+  <h1>Postnet × Cloudflare — char-LM SPSA</h1>
+  <p class="sub">
+    Same 2 379-parameter char-LM as <a href="/lm.html">lm.html</a>, same byzantine
+    defense, same federated text shards. The proposal shape is different:
+    instead of submitting <code>(indices, values)</code> for 6 random params,
+    each worker probes a coherent Gaussian direction via SPSA and submits
+    <code>(seed, scalar_g)</code> — a 20-byte step on <em>all</em> P params.
+    This is the fusion with <a href="https://arxiv.org/abs/2405.15861">DeComFL</a>
+    that lifts the protocol's parameter ceiling from ~10K toward LLM scale.
+  </p>
+
+  <div class="panel">
+    <button id="join">Join SPSA-LM swarm</button>
+    <button id="reset" class="secondary">Reset coordinator</button>
+    <label style="margin-left:14px;font-size:13px;color:#a02828;">
+      <input type="checkbox" id="attack" style="vertical-align:middle;" />
+      attack mode (this tab fabricates seeds + lies about delta → should get quarantined)
+    </label>
+    <div class="stats">
+      <div class="stat"><label>worker</label><b id="wid">—</b></div>
+      <div class="stat"><label>round</label><b id="round">—</b></div>
+      <div class="stat"><label>proposals</label><b id="pool">—</b></div>
+      <div class="stat"><label>peers</label><b id="peers">—</b></div>
+      <div class="stat"><label>test loss</label><b id="loss">—</b></div>
+      <div class="stat"><label>accept rate</label><b id="ar">—</b></div>
+      <div class="stat"><label>bandwidth</label><b id="bw">↑0 B ↓0 B</b></div>
+    </div>
+    <canvas id="chart" width="900" height="240"></canvas>
+
+    <p style="margin: 18px 0 6px; font-size:13px;"><b>Live sample</b> — 100 chars seeded from "t", greedy + temperature:</p>
+    <div id="sample">(idle)</div>
+    <div class="text-preview"><b>target text (340 chars):</b> the bird sings every dawn the cat sleeps in the sun the dog runs to the park…</div>
+
+    <div id="log">(idle)</div>
+    <p class="note">
+      SPSA per round, per worker: 4 trials × (3 forward passes + 1 lossBefore reuse) ≈ 13 forwards.
+      Each trial probes <code>(L(θ+εu) − L(θ−εu)) / 2ε</code> along a fresh Gaussian direction u
+      (seed → mulberry32 → Box-Muller, bit-reproducible on the server). The server picks the
+      worker whose probe predicts the steepest local loss drop and applies
+      <code>θ ← θ − η·g·u</code>. ε = 0.01, η = 0.005, P = 2 379.
+      <br><br>
+      <b>Why this matters:</b> a single 20-byte proposal nudges <em>all</em> 2 379 parameters in
+      a coherent direction. For the current toy model the per-round bandwidth is similar to
+      <a href="/lm.html">lm.html</a>'s flip-and-accept, but the protocol shape is identical
+      whether P = 2 379 or P = 3 800 000 000.
+    </p>
+  </div>
+
+  <script type="module" src="/spsa-lm-worker.js"></script>
+</body>
+</html>

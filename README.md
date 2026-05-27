@@ -70,6 +70,10 @@ All four pages are independent Durable Objects sharing the same Cloudflare proje
 | 31 | Tiered fraud-detection windows (defends against patient-patient attackers) | `c19fddf` |
 | 32 | Production finding: DO free-tier daily quota | `35a2c70` |
 | 33 | localStorage-cached bootstrap for char-LM | `dd723ae` |
+| 34 | README phase table catchup through phase 33 | `4d50402` |
+| 35 | WebGPU substrate for char-LM scorer (`public/lm-webgpu-scorer.js` + parity test) | _uncommitted_ |
+| 36 | SPSA tournament char-LM (DeComFL fusion; tournament-spsa-lm DO + worker) | _uncommitted_ |
+| 37 | Scaling crossover empirical — SPSA wins past P ~ 30K (see `docs/PHASE_37_SCALING.md`) | _uncommitted_ |
 
 Each phase ships a real change to the protocol or the demo and is documented either in `docs/` or in a per-phase commit message that includes the empirical result.
 
