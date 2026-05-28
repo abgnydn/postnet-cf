@@ -71,12 +71,11 @@ All four pages are independent Durable Objects sharing the same Cloudflare proje
 | 32 | Production finding: DO free-tier daily quota | `35a2c70` |
 | 33 | localStorage-cached bootstrap for char-LM | `dd723ae` |
 | 34 | README phase table catchup through phase 33 | `4d50402` |
-| 35 | WebGPU substrate for char-LM scorer (`public/lm-webgpu-scorer.js` + parity test) | _uncommitted_ |
-| 36 | SPSA tournament char-LM (DeComFL fusion; tournament-spsa-lm DO + worker) | _uncommitted_ |
-| 37 | Scaling crossover empirical — SPSA wins past P ~ 30K (see `docs/PHASE_37_SCALING.md`) | _uncommitted_ |
-| 38 | Federated head-classifier on real MiniLM features — SPSA outperforms flip-and-accept at P=50K, real downstream task (see `docs/PHASE_38_HEAD.md`) | _uncommitted_ |
-| 39 | Adaptive η on SPSA tournament — symmetric AIMD beats fixed-η: 1.84× loss descent, +16 pp acc (R=90). MEAZO claim supported (see `docs/PHASE_39_ADAPTIVE_ETA.md`) | _uncommitted_ |
-| 39b | Adam-on-scalar (MEAZO-faithful) — bounded step caps at lr; loses to sym-AIMD with default hyperparams (see `docs/PHASE_39B_ADAM_ON_SCALAR.md`) | _uncommitted_ |
+| 35 | WebGPU substrate for char-LM scorer (`public/lm-webgpu-scorer.js` + parity test) | `440dfb7` |
+| 36-37 | SPSA tournament char-LM (DeComFL fusion) + scaling crossover empirical — SPSA wins past P ~ 30K (see `docs/PHASE_37_SCALING.md`) | `008b20a` |
+| 38 | Federated head-classifier on real MiniLM features — SPSA outperforms flip-and-accept at P=50K, real downstream task (see `docs/PHASE_38_HEAD.md`) | `0a7829c` |
+| 39 | Adaptive η on SPSA tournament — symmetric AIMD beats fixed-η: 1.84× loss descent, +16 pp acc (R=90). MEAZO claim supported (see `docs/PHASE_39_ADAPTIVE_ETA.md`) | `4c6cb26` |
+| 39b | Adam-on-scalar (MEAZO-faithful) — bounded step caps at lr; loses to sym-AIMD with default hyperparams (see `docs/PHASE_39B_ADAM_ON_SCALAR.md`) | `f73fe22` |
 
 Each phase ships a real change to the protocol or the demo and is documented either in `docs/` or in a per-phase commit message that includes the empirical result.
 
