@@ -21,6 +21,7 @@ export { TournamentLMBig } from "./tournament-lm-big";
 export { TournamentSpsaLMBig } from "./tournament-spsa-lm-big";
 export { TournamentHeadFlip } from "./tournament-head-flip";
 export { TournamentHeadSpsa } from "./tournament-head-spsa";
+export { TournamentHeadSpsaAdaptive } from "./tournament-head-spsa-adaptive";
 
 export interface Env {
   COORD: DurableObjectNamespace;
@@ -32,6 +33,7 @@ export interface Env {
   TOURNAMENT_SPSA_LM_BIG: DurableObjectNamespace;
   TOURNAMENT_HEAD_FLIP: DurableObjectNamespace;
   TOURNAMENT_HEAD_SPSA: DurableObjectNamespace;
+  TOURNAMENT_HEAD_SPSA_ADAPTIVE: DurableObjectNamespace;
   ASSETS: Fetcher;
   SNAPSHOTS: R2Bucket;
 }
@@ -293,6 +295,10 @@ export default {
     if (url.pathname.startsWith("/api/head-flip/")) {
       const id = env.TOURNAMENT_HEAD_FLIP.idFromName("default");
       return env.TOURNAMENT_HEAD_FLIP.get(id).fetch(request);
+    }
+    if (url.pathname.startsWith("/api/head-spsa-adaptive/")) {
+      const id = env.TOURNAMENT_HEAD_SPSA_ADAPTIVE.idFromName("default");
+      return env.TOURNAMENT_HEAD_SPSA_ADAPTIVE.get(id).fetch(request);
     }
     if (url.pathname.startsWith("/api/head-spsa/")) {
       const id = env.TOURNAMENT_HEAD_SPSA.idFromName("default");
