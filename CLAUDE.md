@@ -46,7 +46,14 @@ _Updated: 2026-05-28 (Phases 39 + 39b shipped; sym-AIMD remains canonical; Phase
 - INTELLECT-3 (Prime Intellect, Nov 2025) went centralized — abandoned the decentralized story. "Anyone-can-join" frontier in mid-2026 = Nous DisTrO + Pluralis + postnet-cf + NTK-Mirror (the latter is single-machine but the gate parameterization is FL-shaped).
 - NTK-Mirror is brand new (May 23, 2026) but going viral fast. Combining it with postnet-cf + neuropulse is a "three-MIT-projects compose into one Cloudflare Worker that trains real LLM behavior across browser tabs" story — genuinely novel positioning.
 
-**The "obvious next move" if you say "go":** Phase 40 (NTK-Mirror integration). Phase 39b (Adam-on-scalar) is a quick optional sanity check that can be done as a warm-up if you want a half-day prelude.
+**The "obvious next move" if you say "go":** Phase 40 next-1 step (per `docs/PHASE_40_NTKMIRROR_PLAN.md`). Phase 40 scoping is DONE — ntkmirror is installed at `~/ntkmirror/.venv`, the demo runs, the controller `.pt` artifact has been dissected. Wire-format math confirmed: K=5 000 gates = 40 KB static controller, per-round wire still 20 bytes. The next session should: (a) write the Python gate-selection script that emits a binary artifact, (b) port the gate-apply hook to TS, (c) bake K=5 000 gates for one (base_model, task) pair as a static asset under `public/data/`. ~3 hours. See PHASE_40_NTKMIRROR_PLAN.md for the full 4-session sequence.
+
+**Phase 40 scoping notes (so the next session doesn't redo them):**
+- ntkmirror cloned at `~/ntkmirror`, installed editable in `~/ntkmirror/.venv` (Python 3.14, torch 2.12, transformers 5.9).
+- Required Mac flag: `--dtype fp32`. Defaults NaN at step 8 on MPS.
+- Qwen2.5-0.5B-Instruct: 24 decoder layers × 896 hidden = 21 504 candidate gates per (model, layer, channel). Default K=5 000 selects ~23 %.
+- Trained controller (K=512): 91.8 % of gates non-zero, gates use only ~20 % of the 0.05 budget (room for stronger updates).
+- Tractable browser-side compute per Phase 40 design table: 5-20 min per 100 rounds via Transformers.js, 2-8 min via neuropulse WGSL.
 
 **Quick orientation pointers:**
 
