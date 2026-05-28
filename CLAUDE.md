@@ -56,10 +56,12 @@ Two-tab live Chrome verified: cross-audit ledger grows correctly under attacker 
 - INTELLECT-3 (Prime Intellect, Nov 2025) went centralized — abandoned the decentralized story. "Anyone-can-join" frontier in mid-2026 = Nous DisTrO + Pluralis + postnet-cf + NTK-Mirror (the latter is single-machine but the gate parameterization is FL-shaped).
 - NTK-Mirror is brand new (May 23, 2026) but going viral fast. Combining it with postnet-cf + neuropulse is a "three-MIT-projects compose into one Cloudflare Worker that trains real LLM behavior across browser tabs" story — genuinely novel positioning.
 
+**Phase 40 next-6e deliverable (DONE — empirical):** `docs/PHASE_40_NEXT6_EMPIRICAL.md` — python honest (Qwen on MPS, scripts/ntk-verifier.py) + browser attacker (`?attack=1`). Attacker quarantined at 10 audits (~150 s after honest came online); 100% fraud detection rate via magnitude-lie test. Post-quarantine loss 1.7632 → 1.7570 over ~120 honest rounds (server R=183); η climbed 1.0e-3 → 2.8e-3 monotonically (21 grow / 0 shrink). l2_norm of the K=5000 gate vector grew 0 → 0.634. README row `40-4b-s6e` added.
+
 **The "obvious next move" if you say "go":** Phase 40 next-7. Two well-scoped candidates remaining:
 - (a) **HF Hub upload of the 994 MB int8 ONNX** + flip `ONNX_URL` default in `public/ntk-worker.js` so the demo works without a local sibling http-server. Unblocks "share the URL with one stranger" demo. ~30 min.
-- (b) **Longer empirical run (R=200+)** in two-tab Chrome with the new s6 byzantine code path active. Capture a `PHASE_40_NEXT6_EMPIRICAL.md` writeup with loss curve, η drift, fraud detection cadence under attacker spam. Multi-seed if time permits. ~1-2 hr.
-- (c) **Phase 41 — VerifBFL zk-SNARK** for cryptographic commitment to data shard. Replaces "trust the audit" with "verify the proof." Sybil-resistant by construction. ~1 week. The splashy paper-grade upgrade.
+- (b) **Phase 41 — VerifBFL zk-SNARK** for cryptographic commitment to data shard. Replaces "trust the audit" with "verify the proof." Sybil-resistant by construction. ~1 week. The splashy paper-grade upgrade.
+- (c) **Multi-seed sweep** on the next-6 empirical (current is N=1). 5 seeds × R=200 for a publication-quality fraud-detection table. ~1 hr.
 
 **Phase 40 next-5b deliverables (DONE):**
 - `public/ntk-worker.js` — attack mode now defined + short-circuits ONNX/ORT/snapshot loads; WebGPU EP attempt with WASM fallback (URL param `?backend=wasm|webgpu` overrides); `Response.bytes()` for single-allocation model fetch.
