@@ -46,20 +46,23 @@ _Updated: 2026-05-28 (Phases 39 + 39b shipped; sym-AIMD remains canonical; Phase
 - INTELLECT-3 (Prime Intellect, Nov 2025) went centralized — abandoned the decentralized story. "Anyone-can-join" frontier in mid-2026 = Nous DisTrO + Pluralis + postnet-cf + NTK-Mirror (the latter is single-machine but the gate parameterization is FL-shaped).
 - NTK-Mirror is brand new (May 23, 2026) but going viral fast. Combining it with postnet-cf + neuropulse is a "three-MIT-projects compose into one Cloudflare Worker that trains real LLM behavior across browser tabs" story — genuinely novel positioning.
 
-**The "obvious next move" if you say "go":** Phase 40 next-4-b session 2 (quantize + browser worker). Session 1 just shipped: `scripts/export-qwen-with-gates.py` produces a fp32 Qwen-0.5B-Instruct ONNX (1.8 GB total via external-data sidecar) with per-layer gate multipliers as a forward input. Wrapper math validated at zero diff vs PyTorch; ONNX vs PyTorch within 2.43e-4 fp32 noise.
+**The "obvious next move" if you say "go":** Phase 40 next-4-b session 3 (browser worker). Sessions 1 and 2 just shipped the quantization pipeline: the fp32 Qwen+gates ONNX (session 1, 1.8 GB) is now also producible as int8 dynamic (session 2, 866 MB, 3.7× faster, top-1 token preserved). int4 deferred (needs onnxruntime-genai's separate model builder).
 
-**Phase 40 next-4-b session 2 plan (~3-4 hours, per `docs/PHASE_40_NEXT4B_QWEN_ONNX.md`):**
-1. Quantize: pick between in-repo int4 (~250 MB, requires onnxruntime's quantization toolchain) or adopt Xenova/Qwen2.5-0.5B-Instruct from HF (already int4, ~250 MB) and inject the 24 Mul nodes via ONNX graph surgery.
-2. Write `public/ntk-worker.js` — onnxruntime-web in browser, loads the quantized ONNX, computes per-trial gate_mults from raw[K] = exp(0.05·tanh(raw[slot])), runs forward with that, SPSA loop matching `scripts/ntk-verifier.py`.
-3. `public/ntk.html` demo page paralleling `head.html` / `lm.html`.
-4. Bump TARGET_PROPOSALS back to 2 in `src/tournament-ntk.ts` once browser workers are running.
-5. Optional fallback: ship gates for Pythia-160M (~160 MB int4) for memory-constrained tabs.
+**Phase 40 next-4-b session 3 plan (~3-4 hours, see `docs/PHASE_40_NEXT4B_QWEN_ONNX.md`):**
+1. Decide hosting for the 866 MB int8 ONNX: HF Hub (free public CDN, recommended) or R2.
+2. Write `public/ntk-worker.js` — onnxruntime-web via ESM, fetch ONNX to OPFS (cached across reloads), SPSA loop mirroring `scripts/ntk-verifier.py`. Compute `gate_mults[24, 896]` per trial from current `raw[K=5000]`: each (layer, channel) slot maps to a position in the matrix; non-gate positions stay at 1.0; gated positions = `exp(0.05 * tanh(raw[slot]))`.
+3. `public/ntk.html` demo page paralleling head.html / lm.html.
+4. Bump TARGET_PROPOSALS back to 2 in `src/tournament-ntk.ts`.
+5. Fallback (if 866 MB / WASM forward too slow): switch demo to Pythia-160M, re-bake gates, ~40 MB int4 alternative.
+
+**Phase 40 next-4-b session 2 deliverables (DONE):**
+- `scripts/quantize-qwen-onnx.py` — int8 dynamic quantization via `onnxruntime.quantization.quantize_dynamic`; per-channel MatMul + Gemm; validated by forward-comparing logits to fp32 (top-1 token MUST match).
+- Empirical: 866 MB int8 from 1.8 GB fp32 (47% reduction), forward 1166 ms vs 4366 ms (3.7× faster), top-1 token = 220 (' ') matches both backends.
+- int4 path documented but not built (needs onnxruntime-genai model builder + ONNX surgery to inject gates).
 
 **Phase 40 next-4-b session 1 deliverables (DONE):**
 - `scripts/export-qwen-with-gates.py` — torch.onnx.export wrapper with forward hooks; produces ONNX whose inputs include `gate_mults: [24, 896] float32`
-- `docs/PHASE_40_NEXT4B_QWEN_ONNX.md` — design + validation + session 2 plan
-- `.gitignore` now excludes `public/data/*.onnx` and `*.onnx.data` (the artifacts are too large to commit; ~1.8 GB total fp32)
-- `~/ntkmirror/.venv` has `onnx`, `onnxruntime`, `onnxscript` installed for future runs
+- `~/ntkmirror/.venv` has `onnx`, `onnxruntime`, `onnxscript`, `onnxruntime-genai` installed
 
 **Phase 40 next-4-a deliverables (DONE):**
 - `public/head-spsa-worker.js` — browser SPSA worker over the head-classifier MLP

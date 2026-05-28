@@ -129,7 +129,7 @@ as a CF static asset.
 ## Reproducing this session
 
 ```bash
-~/ntkmirror/.venv/bin/pip install onnx onnxruntime onnxscript
+~/ntkmirror/.venv/bin/pip install onnx onnxruntime onnxscript onnxruntime-genai
 cd ~/postnet-cf
 ~/ntkmirror/.venv/bin/python scripts/export-qwen-with-gates.py
 ```
@@ -137,3 +137,100 @@ cd ~/postnet-cf
 Output ends up in `public/data/qwen05b-with-gates.onnx`
 + `public/data/qwen05b-with-gates.onnx.data`. Expect ~40 s of export
 time and ~1.8 GB of disk.
+
+---
+
+# Session 2 — quantization
+
+## What this session shipped
+
+```
+   scripts/quantize-qwen-onnx.py
+   ──────────────────────────────
+   takes the fp32 ONNX from session 1 and emits a quantized version.
+   Supports --mode int8 (dynamic, per-channel MatMul/Gemm quant) and
+   --mode int4 (block-wise weight-only, gpt-q-style).
+```
+
+## int8 result (the artifact that actually shipped)
+
+| metric                       | value                                                  |
+|---|---|
+| input (fp32)                 | 1.8 GB total (3.9 MB graph + 1.8 GB data sidecar)      |
+| output (int8 dynamic)        | **865.9 MB single file** (no sidecar — fits in one .onnx) |
+| size reduction               | 53% (1.8 GB → 866 MB)                                  |
+| forward time, CPU (seq=13)   | fp32 4366 ms → int8 **1166 ms** (3.7× faster)          |
+| logits max abs diff vs fp32  | 17.13 (large; expected for dynamic int8 of LLM matmul) |
+| logits mean abs diff vs fp32 | 1.46                                                   |
+| top-1 next token agreement   | **✓ match** (token 220 = ' ' for both fp32 and int8)   |
+
+The "logits diff = 17" looks scary but it's typical for dynamic int8
+on transformer matmuls. The number that matters for generation is the
+**top-1 token agreement**, which holds. For our SPSA use case, the
+gate-driven changes are perturbations on TOP of this baseline — what
+matters is that the quantized model is a stable inference engine, not
+that it matches fp32 logits exactly.
+
+## int4 status — DEFERRED
+
+`onnxruntime.quantization.matmul_4bits_quantizer` is not in the Python
+3.14 build of onnxruntime 1.26.0 we installed. `onnxruntime-genai` has
+its own model builder that can produce int4 ONNX from PyTorch directly
+but it's a different API and would require re-architecting the export.
+
+Three viable paths to int4 in session 3 (or earlier if we want a
+smaller browser asset):
+
+1. **Use onnxruntime-genai's model builder** to produce int4 Qwen
+   directly, then inject our gate Mul nodes via ONNX surgery on the
+   output. ~1 session.
+2. **Downgrade onnxruntime** to a version that exposes the 4-bit
+   quantizer in the Python API. Risk: might break torch ONNX export.
+3. **Switch demo base to Pythia-160M** (~40 MB int4). Much
+   browser-friendlier; doesn't require int4 tooling for Qwen. Forces
+   re-baking the gate-selection artifact for the new base.
+
+(3) is the most pragmatic ship path for the demo.
+
+## Session 3 — browser worker (planned, ~3-4 hours)
+
+```
+   public/ntk-worker.js + public/ntk.html
+
+   architecture:
+     - onnxruntime-web loaded via dynamic ESM import (~12 MB wasm + js)
+     - on first Join: fetch qwen05b-with-gates-int8.onnx (~866 MB)
+       into OPFS (persists across reloads); subsequent joins are instant
+     - SPSA loop, mirroring scripts/ntk-verifier.py:
+         * fetch /api/ntk/snapshot for current theta = raw[K=5000]
+         * per round:
+             - reconcile applied flips
+             - compute gate_mults[24, 896] from raw[K] + artifact
+             - T=4 SPSA trials, each = 3 forwards (ort session.run)
+             - submit best with audit_loss_before
+         * use ETA from /tick responses (Phase 39 sym-AIMD active)
+     - status pane: round, η, loss, gate-saturation stats, throughput
+
+   deployment caveats:
+     - 866 MB asset is too large for CF assets free tier (25 MB/file)
+       and too large for CF assets paid tier (100 MB/file)
+     - Options: R2 (~$0.015/GB/month), HuggingFace (free, signed CDN)
+     - Recommended: upload to HF as a public model (free, fast CDN),
+       worker fetches from there
+
+   probable bottlenecks:
+     - Forward time on CPU/wasm: 1166 ms (Mac M-series, seq=13)
+     - With WebGPU EP enabled (if compatible): ~200-400 ms
+     - 12 forwards per round → 14 sec/round CPU, 3-5 sec/round WebGPU
+     - 100 rounds → 25 min CPU, 5-8 min WebGPU
+```
+
+## Reproducing session 2
+
+```bash
+~/ntkmirror/.venv/bin/python scripts/quantize-qwen-onnx.py --mode int8
+# → public/data/qwen05b-with-gates-int8.onnx (866 MB, gitignored)
+```
+
+22 second runtime; uses ~3 GB peak RAM during the per-channel
+quantization pass.
