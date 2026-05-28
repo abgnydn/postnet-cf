@@ -560,7 +560,12 @@ async function runForever() {
         const seedBase = ((localRound + 1) * 1000003) ^ (workerId.charCodeAt(0) * 31 + workerId.charCodeAt(2));
         const rng = mulberry32(seedBase);
         const fakeSeed = (rng() * 0xFFFFFFFF) >>> 0;
-        const reported = await submitBest(localRound, fakeSeed, 1.0, -10, 0);
+        // Phase 40 next-6: attacker MUST NOT send audit_loss_before — running
+        // no forward passes means no loss to report. Previously sent 0,
+        // which corrupted the server's lastLoss baseline AND let one attacker
+        // cross-close pending audits for OTHER attackers (Sybil amplifier).
+        // Server-side guard rejects audit_loss_before <= 0; this matches.
+        const reported = await submitBest(localRound, fakeSeed, 1.0, -10, undefined);
         if (typeof reported.eta === "number") { ETA = reported.eta; currentEta = reported.eta; }
         if (reported.quarantined) {
           log(`⚠ QUARANTINED — server detected fraud (this was the point)`);

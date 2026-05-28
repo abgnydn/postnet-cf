@@ -52,6 +52,7 @@ export interface Env {
 const ARTIFACT_URL = "http://internal/data/qwen05b-math-gates-k5000.bin";
 
 // Protocol constants.
+const PENDING_AUDIT_MAX = 64;     // cap on outstanding (un-audited) applies
 const EPSILON = 0.005;            // SPSA perturbation magnitude
 const ETA_INIT = 0.001;           // initial step size; ADAPTED per Phase 39 sym-AIMD
 // Phase 39's symmetric AIMD multipliers — log-symmetric so η drifts based on
@@ -65,6 +66,14 @@ const ETA_MAX = 0.1;
 // effectively the base model and small θ steps barely shift loss. With this
 // threshold the audit signal lifts above noise within ~10 rounds.
 const ETA_DELTA_THRESH = 1e-5;
+// Phase 40 next-6: magnitude-lie threshold for byzantine detection. Honest
+// per-trial Δloss for K=5000 gates at η≈1e-3 is O(1e-2) in magnitude. A
+// worker that claims claimedDelta < realDelta - this threshold is lying
+// about magnitude (e.g. claims -10, real -0.01). This catches the "fabricate
+// a hugely negative claimed_delta to always win the tournament" attack even
+// when the random perturbation happens to lower loss (so the prior
+// "loss went UP" test misses it).
+const MAGNITUDE_LIE_THRESH = 0.5;
 // Phase 40 next-5: bumped to 2 now that the browser worker is the canonical
 // federated path. Two tabs can run simultaneously on a 16-GB Mac (each tab
 // is ~1.5 GB ONNX + ORT overhead). For solo-dev runs without a second worker,
@@ -137,12 +146,17 @@ export class TournamentNtk extends DurableObject<Env> {
   // compute anyway for their claimed_Δ). Server uses it to drive Phase
   // 39 sym-AIMD η + byzantine real_Δ check on a one-round lag.
   private lastLoss: number | null = null;
-  private savedLossBeforeApply: number | null = null;
-  private pendingAudit: {
+  // Phase 40 next-6 — queue of pending audits (was single-slot in next-3).
+  // Each apply enqueues; each incoming audit dequeues the earliest entry
+  // whose workerId differs from the auditor (no self-audits).
+  // Capped at PENDING_AUDIT_MAX entries — pathologically lopsided runs
+  // discard the oldest unaudited apply.
+  private pendingAudits: Array<{
     round: number;
     workerId: string;
     claimedDelta: number;
-  } | null = null;
+    savedLossBeforeApply: number;
+  }> = [];
   // Adaptive η (Phase 39 sym-AIMD), now driven by audited loss.
   private currentEta = ETA_INIT;
   private etaGrowEvents = 0;
@@ -342,8 +356,7 @@ export class TournamentNtk extends DurableObject<Env> {
     this.snapshotRound = 0;
     this.snapshotShards = [];
     this.lastLoss = null;
-    this.savedLossBeforeApply = null;
-    this.pendingAudit = null;
+    this.pendingAudits = [];
     this.currentEta = ETA_INIT;
     this.etaGrowEvents = 0;
     this.etaShrinkEvents = 0;
@@ -374,20 +387,41 @@ export class TournamentNtk extends DurableObject<Env> {
     if (!body.worker_id) return new Response("missing worker_id", { status: 400 });
     this.joined.add(body.worker_id);
 
-    // ── PHASE 40 next-3: audit ingestion ────────────────────────────────────
-    // If the worker reports a loss measurement, use it. If a previous round's
-    // winner is awaiting audit, compute real_Δ NOW and run the byzantine check
-    // + sym-AIMD η update on it.
-    if (typeof body.audit_loss_before === "number") {
+    // ── PHASE 40 next-6: audit ingestion with no-self-audit rule ────────────
+    // Phase 40 next-3 trusted any worker's audit to close the single
+    // outstanding pending audit. Live two-tab test (Session 5b) showed an
+    // attacker that fabricates audit_loss_before can close its OWN audit
+    // → fraud counters never fire. Fix: an audit only closes a pending
+    // entry whose winnerId differs from the auditor. The earliest-eligible
+    // pending entry is resolved; if none match, the audit is just used to
+    // refresh lastLoss (which the auditor's next forward DID compute).
+    // Phase 40 next-6: also reject audit_loss_before <= 0. A real LM forward
+    // returns positive cross-entropy; zero (or negative) means the worker
+    // didn't compute a loss and is sending a sentinel. An attacker that
+    // submits audit=0 was previously able to corrupt the server's lastLoss
+    // baseline AND close pending audits for other workers via the no-self
+    // rule's cross-audit pathway. Trust only positive losses.
+    if (typeof body.audit_loss_before === "number" && body.audit_loss_before > 0) {
       const newLoss = body.audit_loss_before;
-      if (this.pendingAudit && this.savedLossBeforeApply !== null) {
-        const realGlobalDelta = newLoss - this.savedLossBeforeApply;
-        const { workerId, claimedDelta } = this.pendingAudit;
+      const idx = this.pendingAudits.findIndex(p => p.workerId !== body.worker_id);
+      if (idx !== -1) {
+        const entry = this.pendingAudits[idx];
+        this.pendingAudits.splice(idx, 1);
+        const realGlobalDelta = newLoss - entry.savedLossBeforeApply;
+        const { workerId, claimedDelta } = entry;
         // Phase 9 / 14 / 31 byzantine math, unchanged from Phase 39.
         const stats = this.workerStats.get(workerId) ?? { wins: 0, frauds: 0, lastWinRound: -1, recent: [], recent_long: [] };
         stats.wins += 1;
-        stats.lastWinRound = this.pendingAudit.round;
-        const isFraud = realGlobalDelta > 1e-4 && claimedDelta < -1e-4;
+        stats.lastWinRound = entry.round;
+        // Phase 40 next-6: two-part fraud test.
+        //   (a) Phase 39 inversion test — claimed improvement, real degradation.
+        //   (b) Magnitude lie — claimed a much bigger improvement than reality.
+        // (b) catches the case where a fabricated-seed attacker gets lucky
+        // and the random perturbation happens to lower loss; (a) misses it
+        // because realDelta < 0.
+        const inversionFraud = realGlobalDelta > 1e-4 && claimedDelta < -1e-4;
+        const magnitudeFraud = claimedDelta < (realGlobalDelta - MAGNITUDE_LIE_THRESH);
+        const isFraud = inversionFraud || magnitudeFraud;
         if (isFraud) stats.frauds += 1;
         stats.recent.push(isFraud ? 1 : 0);
         if (stats.recent.length > 20) stats.recent.shift();
@@ -403,9 +437,6 @@ export class TournamentNtk extends DurableObject<Env> {
           this.currentEta = Math.max(this.currentEta * ETA_DOWN, ETA_MIN);
           this.etaShrinkEvents += 1;
         }
-        // The audit closed the loop for the prior winner; clear pending.
-        this.pendingAudit = null;
-        this.savedLossBeforeApply = null;
       }
       this.lastLoss = newLoss;
     }
@@ -466,14 +497,21 @@ export class TournamentNtk extends DurableObject<Env> {
         if (this.accepted > 0 && this.accepted % SNAPSHOT_EVERY === 0) {
           this.ctx.waitUntil(this.publishSnapshot());
         }
-        // Remember the loss BEFORE this apply so we can compute real_Δ once
-        // the NEXT round's first audit arrives.
-        this.savedLossBeforeApply = this.lastLoss;
-        this.pendingAudit = {
-          round: this.round,
-          workerId: this.bestProposal!.worker_id,
-          claimedDelta: this.bestProposal!.delta,
-        };
+        // Phase 40 next-6: enqueue, don't overwrite. Lopsided runs (one
+        // attacker repeatedly wins before honest peer audits) can stack
+        // multiple pending entries; we cap at PENDING_AUDIT_MAX and drop
+        // the oldest if exceeded.
+        if (this.lastLoss !== null) {
+          this.pendingAudits.push({
+            round: this.round,
+            workerId: this.bestProposal!.worker_id,
+            claimedDelta: this.bestProposal!.delta,
+            savedLossBeforeApply: this.lastLoss,
+          });
+          if (this.pendingAudits.length > PENDING_AUDIT_MAX) {
+            this.pendingAudits.shift();
+          }
+        }
       }
       this.history.push({
         round: this.round, accepted: !!apply, delta: appliedDelta,
@@ -521,7 +559,8 @@ export class TournamentNtk extends DurableObject<Env> {
       advanced,
       // null in next-2; reactivated in next-3 with a loss oracle.
       last_loss: this.lastLoss,
-      pending_audit_round: this.pendingAudit ? this.pendingAudit.round : null,
+      pending_audits: this.pendingAudits.length,
+      pending_audit_round: this.pendingAudits.length > 0 ? this.pendingAudits[0].round : null,
     });
   }
 
@@ -557,7 +596,8 @@ export class TournamentNtk extends DurableObject<Env> {
       considered: this.considered,
       accept_rate: this.considered > 0 ? this.accepted / this.considered : 0,
       last_loss: this.lastLoss,
-      pending_audit_round: this.pendingAudit ? this.pendingAudit.round : null,
+      pending_audits: this.pendingAudits.length,
+      pending_audit_round: this.pendingAudits.length > 0 ? this.pendingAudits[0].round : null,
       worker_stats: (() => {
         const r: Record<string, { wins: number; frauds: number; fraud_rate: number; lastWinRound: number }> = {};
         for (const [wid, st] of this.workerStats.entries()) {

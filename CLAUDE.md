@@ -4,9 +4,19 @@ postnet-cf: federated tournament protocol on Cloudflare Workers. 34 phases shipp
 
 ## 🎯 Resume here (on "continue")
 
-_Updated: 2026-05-28 (Phases 39 + 39b shipped; sym-AIMD remains canonical; Phase 40 plan = NTK-Mirror integration)_
+_Updated: 2026-05-28 (Phase 40-4b-s6 shipped: closed the byzantine hole surfaced in 5b)_
 
-**Where we are.** Phase 39 + 39b shipped: a head-to-head of three η-adaptation rules on the Phase 38 head-classifier (P=49 796). **Symmetric AIMD (Phase 39, ×1.05 / ×1/1.05)** won decisively: at R=90, loss 1.40→1.12 and acc 32%→56% (vs fixed-η's 1.30 / 40% at R=100). **Adam-on-scalar (Phase 39b, MEAZO-faithful)** with textbook hyperparams underperforms — its step normalization caps the effective step magnitude near `lr`, while sym-AIMD lets η drift up unboundedly. MEAZO's "single global scalar matters most" framing is empirically supported; the SHAPE of the adaptation matters more than its sophistication. Sym-AIMD is the canonical Phase 39 algorithm. See `docs/PHASE_39_ADAPTIVE_ETA.md` and `docs/PHASE_39B_ADAM_ON_SCALAR.md`.
+**Where we are.** Phase 40-4b-s6 closed the architecture limit from session 5b's live byzantine test. Three small fixes on `src/tournament-ntk.ts` + one on `public/ntk-worker.js`:
+1. `pendingAudit` → `pendingAudits[]` queue (cap 64) with **no-self-audit rule** — incoming `audit_loss_before` from worker X can only close earliest pending entry whose `winnerId !== X`. Attackers can no longer close their own wins.
+2. Reject `audit_loss_before ≤ 0` — real LM cross-entropy is positive; a zero sentinel was previously corrupting server's `lastLoss` baseline AND closing OTHER attackers' pending audits in a Sybil amplifier.
+3. Magnitude-lie test added alongside Phase 39's inversion test: `claimedΔ < realΔ − MAGNITUDE_LIE_THRESH (= 0.5)` flags exaggerated claims missed by inversion when random perturbation happens to lower loss.
+Two-tab live Chrome verified: cross-audit ledger grows correctly under attacker spam, attacker can't self-close, magnitude check would catch any audit it lands. Full writeup in `docs/PHASE_40_NEXT4B_QWEN_ONNX.md` "Session 6".
+
+**Phase 40 next-6 deliverables (DONE):**
+- `src/tournament-ntk.ts` — `pendingAudits[]` queue (cap 64) + no-self-audit rule + audit_loss_before > 0 guard + magnitude-lie fraud test (`MAGNITUDE_LIE_THRESH = 0.5`).
+- `public/ntk-worker.js` — attacker no longer sends `audit_loss_before` (was 0; now `undefined` → JSON drops the field).
+- `docs/PHASE_40_NEXT4B_QWEN_ONNX.md` "Session 6" — full writeup including what's NOT fixed (multi-tab coordinated Sybil → deferred to a future cryptographic-commitment phase).
+- README.md — `40-4b-s6` row added.
 
 **Files staged but uncommitted (as of 2026-05-28):**
 
@@ -46,7 +56,10 @@ _Updated: 2026-05-28 (Phases 39 + 39b shipped; sym-AIMD remains canonical; Phase
 - INTELLECT-3 (Prime Intellect, Nov 2025) went centralized — abandoned the decentralized story. "Anyone-can-join" frontier in mid-2026 = Nous DisTrO + Pluralis + postnet-cf + NTK-Mirror (the latter is single-machine but the gate parameterization is FL-shaped).
 - NTK-Mirror is brand new (May 23, 2026) but going viral fast. Combining it with postnet-cf + neuropulse is a "three-MIT-projects compose into one Cloudflare Worker that trains real LLM behavior across browser tabs" story — genuinely novel positioning.
 
-**The "obvious next move" if you say "go":** Phase 40 next-6 — fix the byzantine hole surfaced in 5b's live test. Session 5b shipped quick wins (WebGPU EP fallback, attack mode w/ ONNX skip, `Response.bytes()` single-allocation load, TARGET=2) AND surfaced a real architecture limit: the trusted-auditor scheme from Phase 40-3 lets a fast attacker out-spam a slow honest auditor (1.5% fraud rate vs 40% quarantine threshold over 65 wins in 2 min). Three viable fixes documented in `docs/PHASE_40_NEXT4B_QWEN_ONNX.md` "Session 5b": cross-audit (3rd worker verifies each apply), rate-limit per worker_id, or cryptographic commitment via VerifBFL.
+**The "obvious next move" if you say "go":** Phase 40 next-7. Two well-scoped candidates remaining:
+- (a) **HF Hub upload of the 994 MB int8 ONNX** + flip `ONNX_URL` default in `public/ntk-worker.js` so the demo works without a local sibling http-server. Unblocks "share the URL with one stranger" demo. ~30 min.
+- (b) **Longer empirical run (R=200+)** in two-tab Chrome with the new s6 byzantine code path active. Capture a `PHASE_40_NEXT6_EMPIRICAL.md` writeup with loss curve, η drift, fraud detection cadence under attacker spam. Multi-seed if time permits. ~1-2 hr.
+- (c) **Phase 41 — VerifBFL zk-SNARK** for cryptographic commitment to data shard. Replaces "trust the audit" with "verify the proof." Sybil-resistant by construction. ~1 week. The splashy paper-grade upgrade.
 
 **Phase 40 next-5b deliverables (DONE):**
 - `public/ntk-worker.js` — attack mode now defined + short-circuits ONNX/ORT/snapshot loads; WebGPU EP attempt with WASM fallback (URL param `?backend=wasm|webgpu` overrides); `Response.bytes()` for single-allocation model fetch.

@@ -711,3 +711,120 @@ cd ~/postnet-cf-onnx && npx http-server -p 8788 --cors -c-1 .
 #         loss starts at ~4.1, descends to ~3.8 over first 4 rounds,
 #         η climbs from 1.0e-3 as sym-AIMD grow events fire.
 ```
+
+## Session 6 — closing the byzantine hole from session 5b
+
+The 5b writeup surfaced that an attacker tab could:
+
+1. **Self-audit** to close its own `pendingAudit` slot, bypassing the
+   fraud check.
+2. **Outrun the auditor** because `pendingAudit` was single-slot —
+   intermediate applies in the gap were silently un-audited.
+3. **Get lucky on random perturbations** — the `isFraud` test only
+   flagged "claimed improvement + real degradation" and missed
+   "claimed −10 + real −0.01" (random walk happens to lower loss).
+
+Session 6 ships three small server-side fixes plus one worker change.
+
+### Fix 1 — no-self-audit rule
+
+`pendingAudit` is now a queue (`pendingAudits[]`, cap 64). On each
+incoming `audit_loss_before` from worker X, the server resolves the
+**earliest** pending entry whose `winnerId !== X`. Self-audits are
+ignored — they can refresh `lastLoss` but cannot close an entry the
+auditor themselves won.
+
+```ts
+const idx = this.pendingAudits.findIndex(p => p.workerId !== body.worker_id);
+if (idx !== -1) {
+  const entry = this.pendingAudits[idx];
+  this.pendingAudits.splice(idx, 1);
+  // ... byzantine check + sym-AIMD η update ...
+}
+```
+
+Live-tested in two-tab Chrome: with honest + attacker (the attacker
+fabricates `claimed_delta = −10` to win every round), `pendingAudits`
+grew unbounded on the attacker until cap kicked in, and **every
+closed entry was credited to the attacker** (not the honest auditor).
+
+### Fix 2 — reject audit_loss_before ≤ 0
+
+A real cross-entropy is positive. An attacker sending
+`audit_loss_before = 0` previously:
+
+- Set `this.lastLoss = 0`, corrupting every subsequent
+  `savedLossBeforeApply` baseline.
+- Closed audits for *other* pending winners (Sybil amplifier when
+  multiple attacker tabs were running).
+
+Server now: `if (typeof body.audit_loss_before === "number" && body.audit_loss_before > 0)`.
+
+The attacker tab was updated symmetrically: `submitBest(…, undefined)`
+instead of `submitBest(…, 0)`. JSON.stringify drops `undefined` keys,
+so the field doesn't even appear in the wire body. Matches "attacker
+runs no forward, so reports no loss."
+
+### Fix 3 — magnitude-lie fraud test
+
+The Phase 39 `isFraud` math:
+
+```ts
+const isFraud = realGlobalDelta > 1e-4 && claimedDelta < -1e-4;
+```
+
+catches "claimed a win, actually lost" but misses "claimed a *huge*
+win, actually a tiny win." With ε = 0.005 and η ≈ 1e-3, a fabricated
+seed yields a real Δloss in `[-0.02, +0.02]` symmetric. The attacker
+that claims `-10` for every proposal will, on random ~50% of rounds,
+end up with `realDelta < 0` from the random direction — and slip past
+the inversion test.
+
+Added `magnitudeFraud`:
+
+```ts
+const MAGNITUDE_LIE_THRESH = 0.5;
+// ...
+const magnitudeFraud = claimedDelta < (realGlobalDelta - MAGNITUDE_LIE_THRESH);
+const isFraud = inversionFraud || magnitudeFraud;
+```
+
+`MAGNITUDE_LIE_THRESH = 0.5` is conservative — honest per-round
+Δloss for K=5000 gates is O(1e-2), so the threshold is 50× above
+the noise floor. An attacker claiming −10 with real −0.01 trips
+the check `(−10 < −0.01 − 0.5 = −0.51 → TRUE)`.
+
+### What this does NOT fix
+
+A coordinated multi-tab Sybil attack (≥ 2 attacker workers
+collaborating, each non-trivially auditing the other's wins with
+**plausible** loss values) still works in principle. The honest peer
+just needs to win the speed race for the audit slot. Defending
+against that requires either:
+
+- A privilege gradient where audits from workers with longer-lived
+  honest history outweigh fresh worker IDs.
+- Cryptographic data-shard commitments (VerifBFL — arXiv:2501.04319).
+
+Both are deferred. The current trio of fixes is the cheap shipping
+answer; Sybil-resistant audit is a separate, much larger phase.
+
+### Reproducing the test
+
+```bash
+# terminal 1:
+cd ~/postnet-cf && npm run dev
+
+# terminal 2:
+cd ~/postnet-cf-onnx && npx http-server -p 8788 --cors -c-1 .
+
+# in Chrome, open two tabs:
+#   tab A: http://localhost:8787/ntk           (honest, loads 994 MB ONNX)
+#   tab B: http://localhost:8787/ntk?attack=1  (attacker, no model load)
+#
+# click Join on each tab. honest tab is auditor; attacker tab spams
+# claimed_delta=-10. expected: within ~5 min, attacker's worker_stats
+# hits cumulative fraud_rate > 0.4 and server returns quarantined=true
+# on subsequent proposals.
+```
+
