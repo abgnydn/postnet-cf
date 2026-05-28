@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Postnet × Cloudflare — federated NTK-Mirror gate-controller (Phase 40-4b)</title>
+  <style>
+    :root { --ink: #1a1a1a; --paper: #fafaf7; --rule: #d4d2cc; --accent: #d6502c; --accent3: #6a4cb0; }
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", system-ui, sans-serif;
+      max-width: 880px; margin: 40px auto; padding: 0 24px;
+      color: var(--ink); background: var(--paper); line-height: 1.5;
+    }
+    h1 { font-weight: 700; margin: 0 0 4px; letter-spacing: -0.02em; }
+    .sub { color: #666; margin: 0 0 12px; font-size: 14px; }
+    .phase {
+      display: inline-block; font-size: 11px; font-weight: 700;
+      letter-spacing: 0.08em; text-transform: uppercase;
+      color: var(--accent3); border: 1px solid var(--accent3);
+      padding: 2px 8px; border-radius: 3px; margin-bottom: 14px;
+    }
+    .panel { border: 1px solid var(--rule); border-radius: 6px; padding: 16px; margin: 16px 0; background: #fff; }
+    button {
+      font: inherit; font-weight: 600; padding: 9px 18px;
+      border: 1px solid var(--ink); background: var(--ink); color: var(--paper);
+      border-radius: 5px; cursor: pointer;
+    }
+    button:disabled { background: #999; border-color: #999; cursor: default; }
+    button.secondary { background: var(--paper); color: var(--ink); }
+    .stats { display: flex; flex-wrap: wrap; gap: 18px; font-size: 14px; margin-top: 12px; }
+    .stat { font-variant-numeric: tabular-nums; }
+    .stat label { color: #666; margin-right: 6px; }
+    .stat b { font-weight: 600; }
+    #chart {
+      width: 100%; height: 240px; display: block;
+      background: #fff; border: 1px solid var(--rule); border-radius: 6px;
+      margin-top: 16px;
+    }
+    #log {
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 12px; white-space: pre; height: 200px; overflow-y: auto;
+      padding: 12px; background: #1a1a1a; color: #e3e3da;
+      border-radius: 6px; margin-top: 12px;
+    }
+    #progress {
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 12px; color: #555;
+      padding: 6px 0; min-height: 18px;
+    }
+    .warn {
+      font-size: 13px; padding: 10px 14px; margin-top: 12px;
+      background: #fff5d6; border: 1px solid #e6c77a; border-radius: 6px;
+    }
+    .note { font-size: 12px; color: #555; margin-top: 12px; line-height: 1.45; }
+    code { background: #efece4; padding: 1px 5px; border-radius: 3px; font-size: 12.5px; }
+    .nav { font-size: 12px; color: #666; margin-bottom: 18px; }
+    .nav a { color: var(--accent); text-decoration: none; }
+    .nav a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <div class="nav">
+    <a href="/">← federated Adam</a> ·
+    <a href="/lm.html">char-LM</a> ·
+    <a href="/spsa-lm.html">char-LM SPSA</a> ·
+    <a href="/head.html">head classifier</a>
+  </div>
+  <span class="phase">Phase 40-4b · NTK-Mirror gate controller</span>
+  <h1>Postnet × Cloudflare — federated Qwen-0.5B gate training</h1>
+  <p class="sub">
+    Federated training of an <a href="https://github.com/leochlon/ntkmirror">NTK-Mirror</a>
+    gate controller — K = 5 000 signed log-gates on the residual streams
+    of a <b>frozen Qwen2.5-0.5B-Instruct</b>. The base model runs FORWARD
+    in your browser tab via <code>onnxruntime-web</code>; only the K = 5 000
+    gate values are trained, federated via the SPSA tournament from
+    Phase 36-39 (DeComFL fusion + symmetric AIMD adaptive η + post-apply
+    byzantine defense via Phase 40-3's audit loop).
+  </p>
+  <div class="warn">
+    <b>Heavy demo.</b> First Join downloads the <b>~866 MB int8 Qwen ONNX</b>
+    into your browser's OPFS storage (cached for future visits). Forward
+    passes in WebAssembly take ~1 second each; 2 SPSA trials per round = 6
+    forwards = ~6 sec/round. Plan for ~10 min per 100 rounds. WebGPU
+    would be 3-5× faster but is gated on browser/driver compatibility.
+  </div>
+
+  <div class="panel">
+    <button id="join">Join NTK swarm</button>
+    <button id="reset" class="secondary">Reset coordinator</button>
+    <label style="margin-left:14px;font-size:13px;color:#a02828;">
+      <input type="checkbox" id="attack" disabled />
+      attack mode (not wired in this phase — byzantine defense is live
+      server-side but no in-browser attacker; see Python verifier
+      <code>BYZANTINE=1</code> flag)
+    </label>
+    <div id="progress">(idle)</div>
+    <div class="stats">
+      <div class="stat"><label>worker</label><b id="wid">—</b></div>
+      <div class="stat"><label>round</label><b id="round">—</b></div>
+      <div class="stat"><label>pool</label><b id="pool">—</b></div>
+      <div class="stat"><label>peers</label><b id="peers">—</b></div>
+      <div class="stat"><label>test loss</label><b id="loss">—</b></div>
+      <div class="stat"><label>η</label><b id="eta">—</b></div>
+      <div class="stat"><label>||θ||</label><b id="theta-norm">—</b></div>
+      <div class="stat"><label>accept rate</label><b id="ar">—</b></div>
+      <div class="stat"><label>bandwidth</label><b id="bw">↑0 B ↓0 B</b></div>
+    </div>
+    <canvas id="chart" width="900" height="240"></canvas>
+
+    <div id="log">(idle)</div>
+    <p class="note">
+      <b>Protocol:</b> SPSA tournament (DeComFL fusion, Phase 36+).
+      Each round, this tab runs 2 SPSA trials on a fixed 4-example math
+      corpus; each trial = 3 Qwen-0.5B forward passes with different
+      gate values; submits the trial with the most-negative claimed Δloss
+      as a 20-byte proposal <code>(seed, scalar_g, delta)</code> plus a 4-byte
+      <code>audit_loss_before</code> (Phase 40-3). Server picks the best
+      across all workers, applies <code>θ ← θ − η · g · u(seed)</code> to
+      the K = 5 000 gate values, broadcasts the applied flip.
+      <br><br>
+      <b>What this is, in one line:</b> federated training of a real LLM
+      (a tiny part of one — the gate controller, P = 5 000 = ~0.001% of
+      Qwen-0.5B's parameters) across browser tabs of strangers, with
+      byzantine tolerance, ~20-byte wire format, no install, free.
+    </p>
+  </div>
+
+  <script type="module" src="/ntk-worker.js"></script>
+</body>
+</html>

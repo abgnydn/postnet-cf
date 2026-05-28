@@ -46,14 +46,29 @@ _Updated: 2026-05-28 (Phases 39 + 39b shipped; sym-AIMD remains canonical; Phase
 - INTELLECT-3 (Prime Intellect, Nov 2025) went centralized — abandoned the decentralized story. "Anyone-can-join" frontier in mid-2026 = Nous DisTrO + Pluralis + postnet-cf + NTK-Mirror (the latter is single-machine but the gate parameterization is FL-shaped).
 - NTK-Mirror is brand new (May 23, 2026) but going viral fast. Combining it with postnet-cf + neuropulse is a "three-MIT-projects compose into one Cloudflare Worker that trains real LLM behavior across browser tabs" story — genuinely novel positioning.
 
-**The "obvious next move" if you say "go":** Phase 40 next-4-b session 3 (browser worker). Sessions 1 and 2 just shipped the quantization pipeline: the fp32 Qwen+gates ONNX (session 1, 1.8 GB) is now also producible as int8 dynamic (session 2, 866 MB, 3.7× faster, top-1 token preserved). int4 deferred (needs onnxruntime-genai's separate model builder).
+**The "obvious next move" if you say "go":** Phase 40 next-4-b session 4 — actually run the demo end-to-end in a real browser, then ship to prod. Session 3 wrote the browser code (`public/ntk.html` + `public/ntk-worker.js`) but couldn't validate it in-session (no claude-in-chrome).
 
-**Phase 40 next-4-b session 3 plan (~3-4 hours, see `docs/PHASE_40_NEXT4B_QWEN_ONNX.md`):**
-1. Decide hosting for the 866 MB int8 ONNX: HF Hub (free public CDN, recommended) or R2.
-2. Write `public/ntk-worker.js` — onnxruntime-web via ESM, fetch ONNX to OPFS (cached across reloads), SPSA loop mirroring `scripts/ntk-verifier.py`. Compute `gate_mults[24, 896]` per trial from current `raw[K=5000]`: each (layer, channel) slot maps to a position in the matrix; non-gate positions stay at 1.0; gated positions = `exp(0.05 * tanh(raw[slot]))`.
-3. `public/ntk.html` demo page paralleling head.html / lm.html.
-4. Bump TARGET_PROPOSALS back to 2 in `src/tournament-ntk.ts`.
-5. Fallback (if 866 MB / WASM forward too slow): switch demo to Pythia-160M, re-bake gates, ~40 MB int4 alternative.
+**Phase 40 next-4-b session 4 plan:**
+1. **User validation:** terminal 1 = `npm run dev`; terminal 2 = `cd ~/postnet-cf-onnx && npx http-server -p 8788 --cors -c-1 .`; open http://localhost:8787/ntk.html. Click Join, watch progress (download → ORT session → first forward → SPSA loop). Confirm loss descends.
+2. **HF Hub upload of the 866 MB int8 ONNX** so prod doesn't depend on a sibling local server. Instructions in `docs/PHASE_40_NEXT4B_QWEN_ONNX.md`. After upload, flip `ONNX_URL` default in `public/ntk-worker.js`.
+3. **Bump TARGET_PROPOSALS = 2** in `src/tournament-ntk.ts` once we know two browser tabs can run concurrently.
+4. **WebGPU EP** (1-line change in worker; ~3-5× speedup if compatible).
+5. **Longer empirical run** (R=200+) + writeup similar to Phase 37 crossover or Phase 39 sym-AIMD.
+
+**Phase 40 next-4-b session 3 deliverables (DONE):**
+- `public/ntk-worker.js` (~580 LOC) — ESM, onnxruntime-web from CDN, OPFS-cached 866 MB ONNX, SPSA loop mirroring Python verifier 1:1, baked tokenized math corpus.
+- `public/ntk.html` — demo page paralleling head.html / lm.html with download-progress display.
+- ONNX moved out of `public/data/` (wrangler dev rejects assets > 25 MiB) into `~/postnet-cf-onnx/`; documented sibling-http-server pattern + HF Hub upload path for prod.
+- All Phase 40 next-4-b session 3 caveats + per-round wall-time estimates in `docs/PHASE_40_NEXT4B_QWEN_ONNX.md`.
+
+**Phase 40 next-4-b session 2 deliverables (DONE):**
+- `scripts/quantize-qwen-onnx.py` — int8 dynamic quantization via `onnxruntime.quantization.quantize_dynamic`; per-channel MatMul + Gemm; validated by forward-comparing logits to fp32 (top-1 token MUST match).
+- Empirical: 866 MB int8 from 1.8 GB fp32 (47% reduction), forward 1166 ms vs 4366 ms (3.7× faster), top-1 token = 220 (' ') matches both backends.
+- int4 path documented but not built (needs onnxruntime-genai model builder + ONNX surgery to inject gates).
+
+**Phase 40 next-4-b session 1 deliverables (DONE):**
+- `scripts/export-qwen-with-gates.py` — torch.onnx.export wrapper with forward hooks; produces ONNX whose inputs include `gate_mults: [24, 896] float32`
+- `~/ntkmirror/.venv` has `onnx`, `onnxruntime`, `onnxscript`, `onnxruntime-genai` installed
 
 **Phase 40 next-4-b session 2 deliverables (DONE):**
 - `scripts/quantize-qwen-onnx.py` — int8 dynamic quantization via `onnxruntime.quantization.quantize_dynamic`; per-channel MatMul + Gemm; validated by forward-comparing logits to fp32 (top-1 token MUST match).

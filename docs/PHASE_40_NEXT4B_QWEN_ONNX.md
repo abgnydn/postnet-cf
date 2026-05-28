@@ -234,3 +234,151 @@ smaller browser asset):
 
 22 second runtime; uses ~3 GB peak RAM during the per-channel
 quantization pass.
+
+---
+
+# Session 3 — browser worker + demo page
+
+## What this session shipped
+
+```
+   public/ntk-worker.js   ESM, ~580 LOC. onnxruntime-web from CDN,
+                          OPFS cache for the 866 MB ONNX, SPSA loop
+                          mirroring scripts/ntk-verifier.py 1:1,
+                          baked tokenized math corpus (no in-browser
+                          tokenizer needed).
+
+   public/ntk.html        Demo page paralleling head.html / lm.html.
+                          Status pane (round / loss / η / θ-norm / etc),
+                          download-progress display, Join + Reset
+                          buttons, log + chart.
+
+   scripts/quantize-qwen-onnx.py and scripts/export-qwen-with-gates.py
+   default outputs were updated to write to ~/postnet-cf-onnx/
+   instead of public/data/ — see "Why the ONNX is no longer in public/"
+   below.
+```
+
+## Why the ONNX is no longer in `public/`
+
+`wrangler dev` (and CF assets in production) **rejects asset files
+larger than 25 MiB**. Even though `.gitignore` keeps our 866 MB ONNX
+out of the repo, leaving it in `public/data/` makes `wrangler dev`
+refuse to start (`Asset too large` error).
+
+Convention going forward:
+
+| artifact                              | location                  | served by             |
+|---|---|---|
+| small static assets (≤ 25 MB)         | `public/data/`            | wrangler / CF assets  |
+| large ONNX models, weights, datasets  | `~/postnet-cf-onnx/`      | separate HTTP server  |
+
+## How to run the demo locally
+
+```bash
+# terminal 1 — wrangler dev (serves the protocol + small assets)
+cd ~/postnet-cf
+npm run dev
+
+# terminal 2 — CORS-friendly server for the big ONNX
+cd ~/postnet-cf-onnx
+npx http-server -p 8788 --cors -c-1 .
+
+# open in browser:
+open http://localhost:8787/ntk.html
+# the page fetches:
+#   /api/ntk/*                                ← from :8787 (wrangler)
+#   /data/qwen05b-math-gates-k5000.bin        ← from :8787
+#   http://localhost:8788/qwen05b-with-gates-int8.onnx  ← from :8788
+```
+
+`?onnx=https://...` URL parameter overrides the default ONNX URL —
+useful for testing HF Hub hosted versions before flipping the default.
+
+## Production hosting (deferred)
+
+The clean production path: upload the int8 ONNX to a HuggingFace model
+repo (free public CDN, fast worldwide):
+
+```bash
+# one-time:
+~/ntkmirror/.venv/bin/pip install huggingface_hub
+~/ntkmirror/.venv/bin/huggingface-cli login
+~/ntkmirror/.venv/bin/huggingface-cli upload \
+   <your-user>/postnet-qwen05b-with-gates \
+   ~/postnet-cf-onnx/qwen05b-with-gates-int8.onnx \
+   qwen05b-with-gates-int8.onnx
+# then in public/ntk-worker.js, change ONNX_URL default to:
+#   "https://huggingface.co/<your-user>/postnet-qwen05b-with-gates/resolve/main/qwen05b-with-gates-int8.onnx"
+```
+
+Alternative: R2 — costs ~$0.015/GB/month for storage + $0/egress, or
+serve via a CF Worker route. More postnet-native but adds bucket setup.
+
+## Browser-side bookkeeping
+
+The worker maintains the SAME state the Python verifier does, plus the
+ORT session:
+
+| state                           | computed where             | when refreshed       |
+|---|---|---|
+| `localTheta` (raw[K=5000])      | server's /snapshot then local apply | every applied flip   |
+| `EPSILON`, `ETA`, `currentEta`  | from /tick + /snapshot      | every response       |
+| `gateMultsBuf [24, 896]`        | client, from `raw` + artifact| every forward (4× per trial) |
+| ORT session                     | client, from .onnx via OPFS | once per page load   |
+| WebSocket subscription          | client                      | once per session     |
+
+The 4-byte `audit_loss_before` field is sent on every proposal — server
+uses it to close Phase 39's sym-AIMD η + byzantine real_Δ check on a
+one-round lag (Phase 40-3 architecture).
+
+## Per-round wall time on M-series Mac (estimate)
+
+```
+   ORT-web WASM, single-threaded, batch=4 seq=32:
+     ~700-1500 ms per forward (varies with how much of the 866 MB
+                                is hot in OS page cache)
+   per trial:    3 forwards = ~2-4.5 sec
+   per round:    2 trials × 3 forwards + 1 lossBefore = 7 forwards
+                 ≈ 5-10 sec/round
+   100 rounds:   ~10-17 min wall time
+```
+
+WebGPU EP would be 3-5× faster but is currently gated behind:
+1. `ort.env.webgpu` needs explicit init
+2. browser must report adapter
+3. some Qwen ops may not be GPU-implemented in ORT-web yet
+
+We default to WASM EP for portability; switching to WebGPU is a
+1-line change in `ntk-worker.js` once verified working.
+
+## What's left for session 4 (and beyond)
+
+1. **Verify the demo actually runs end-to-end in a real browser.**
+   This session shipped the code; testing was deferred (no
+   claude-in-chrome connection). User validation needed.
+2. **Bump TARGET_PROPOSALS back to 2** in `src/tournament-ntk.ts` once
+   we know two browser workers can run simultaneously.
+3. **WebGPU EP** for ~3-5× speedup.
+4. **Production hosting**: upload to HF Hub, flip ONNX_URL default.
+5. **Longer empirical run** (R=200+) and writeup, similar to Phase 37
+   crossover or Phase 39 sym-AIMD.
+
+## Reproducing session 3
+
+```bash
+# regenerate ONNX in the new location:
+~/ntkmirror/.venv/bin/python scripts/export-qwen-with-gates.py \
+    --out ~/postnet-cf-onnx/qwen05b-with-gates.onnx
+~/ntkmirror/.venv/bin/python scripts/quantize-qwen-onnx.py \
+    --in ~/postnet-cf-onnx/qwen05b-with-gates.onnx \
+    --out ~/postnet-cf-onnx/qwen05b-with-gates-int8.onnx
+
+# terminal 1:
+cd ~/postnet-cf && npm run dev
+
+# terminal 2:
+cd ~/postnet-cf-onnx && npx http-server -p 8788 --cors -c-1 .
+
+# open http://localhost:8787/ntk.html
+```
