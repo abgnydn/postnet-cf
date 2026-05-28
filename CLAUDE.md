@@ -46,15 +46,21 @@ _Updated: 2026-05-28 (Phases 39 + 39b shipped; sym-AIMD remains canonical; Phase
 - INTELLECT-3 (Prime Intellect, Nov 2025) went centralized — abandoned the decentralized story. "Anyone-can-join" frontier in mid-2026 = Nous DisTrO + Pluralis + postnet-cf + NTK-Mirror (the latter is single-machine but the gate parameterization is FL-shaped).
 - NTK-Mirror is brand new (May 23, 2026) but going viral fast. Combining it with postnet-cf + neuropulse is a "three-MIT-projects compose into one Cloudflare Worker that trains real LLM behavior across browser tabs" story — genuinely novel positioning.
 
-**The "obvious next move" if you say "go":** Phase 40 next-4 — browser-runnable worker. Next-3 just shipped the trusted-auditor loss oracle, which reactivates Phase 39's sym-AIMD η + byzantine defense for the NTK federated trainer. Empirical R=30: η drifts 1.0e-3 → 2.53e-3 (grow=19 shr=0), loss descent 1.75× larger than next-2. The protocol stack is COMPLETE on real-LLM training — just Python-only on the worker side.
+**The "obvious next move" if you say "go":** Phase 40 next-4-b — the browser worker for NTK + Qwen-0.5B. Next-4-a just shipped (`public/head.html` + `public/head-spsa-worker.js`): a browser-tab worker for the Phase 38/39 head-classifier task — open a URL, click Join, federate-train an AG News classifier with anyone else who has the URL open. Completes the Phase 38/39 demo arc; the NTK-Qwen demo is the bigger lift.
 
-**Phase 40 next-4 scope:**
-- Browser worker that runs Qwen-0.5B (or a smaller proxy like Pythia-160M / DistilGPT-2) forward + injects the gate-apply hook + submits proposals. Two viable engines:
-  - **Transformers.js (Xenova/Qwen-0.5B in ONNX-int4):** easiest port, runs in the browser, but probably needs to fall back to a smaller model for memory; ~3-5 min per 100 rounds.
-  - **neuropulse's WGSL engine** (already runs Phi-3-mini in a browser): faster but needs the gate-apply hook ported to WGSL and a clean way to expose the per-layer output hook point.
-- Decide on the demo target: keep Qwen-0.5B (matches the gate artifact we baked) or rebake gates for a smaller base model (Pythia-160M ~640 MB; fits a tab better).
-- public/ntk.html + public/ntk-worker.js for the demo page.
-- Bump TARGET_PROPOSALS back to 2 in src/tournament-ntk.ts once browser workers are cheap enough to run several at once.
+**Phase 40 next-4-b scope (NTK browser worker, multi-session):**
+- The hard part: Transformers.js doesn't expose per-layer hidden-state hooks for our gate-injection. Three viable architectures to pick between:
+  1. **ONNX graph modification.** Inject `Mul` nodes after each decoder layer's residual. Doable with `onnx` Python tooling; produces a custom int4 ONNX that ships with the artifact. ~2-3 sessions.
+  2. **neuropulse WGSL adoption.** Already runs Phi-3-mini forward in the browser. Port the gate-apply to WGSL and surface a per-layer hook point. Fastest runtime but deepest integration. ~2-3 sessions.
+  3. **Server-side forward via inference API.** Browser worker calls HuggingFace Inference Endpoints (or similar) for the Qwen forward; locally does only SPSA bookkeeping. Easy + slow + private-data concerns. Probably not the right call.
+- Decide on demo target: keep Qwen-0.5B (matches the gate artifact we baked) or rebake gates for a smaller base (Pythia-160M ~640 MB, fits a tab better) so the model-load time is bearable.
+- `public/ntk.html` + `public/ntk-worker.js` for the demo page.
+- Bump TARGET_PROPOSALS back to 2 in `src/tournament-ntk.ts` once browser workers are cheap enough to run several at once.
+
+**Phase 40 next-4-a deliverables (DONE):**
+- `public/head-spsa-worker.js` — browser SPSA worker over the head-classifier MLP
+- `public/head.html` — demo page paralleling lm.html / spsa-lm.html
+- Open URL → click Join → federated-train AG News classifier across browser tabs of strangers
 
 **Phase 40 next-3 deliverables (DONE):**
 - `src/tournament-ntk.ts` — +124 LOC: lastLoss / pendingAudit / sym-AIMD / workerStats / quarantine
