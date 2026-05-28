@@ -6,3 +6,5 @@ node_modules/
 .env.*
 *.log
 .DS_Store
+public/data/*.onnx
+public/data/*.onnx.data

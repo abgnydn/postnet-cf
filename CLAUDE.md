@@ -46,16 +46,20 @@ _Updated: 2026-05-28 (Phases 39 + 39b shipped; sym-AIMD remains canonical; Phase
 - INTELLECT-3 (Prime Intellect, Nov 2025) went centralized — abandoned the decentralized story. "Anyone-can-join" frontier in mid-2026 = Nous DisTrO + Pluralis + postnet-cf + NTK-Mirror (the latter is single-machine but the gate parameterization is FL-shaped).
 - NTK-Mirror is brand new (May 23, 2026) but going viral fast. Combining it with postnet-cf + neuropulse is a "three-MIT-projects compose into one Cloudflare Worker that trains real LLM behavior across browser tabs" story — genuinely novel positioning.
 
-**The "obvious next move" if you say "go":** Phase 40 next-4-b — the browser worker for NTK + Qwen-0.5B. Next-4-a just shipped (`public/head.html` + `public/head-spsa-worker.js`): a browser-tab worker for the Phase 38/39 head-classifier task — open a URL, click Join, federate-train an AG News classifier with anyone else who has the URL open. Completes the Phase 38/39 demo arc; the NTK-Qwen demo is the bigger lift.
+**The "obvious next move" if you say "go":** Phase 40 next-4-b session 2 (quantize + browser worker). Session 1 just shipped: `scripts/export-qwen-with-gates.py` produces a fp32 Qwen-0.5B-Instruct ONNX (1.8 GB total via external-data sidecar) with per-layer gate multipliers as a forward input. Wrapper math validated at zero diff vs PyTorch; ONNX vs PyTorch within 2.43e-4 fp32 noise.
 
-**Phase 40 next-4-b scope (NTK browser worker, multi-session):**
-- The hard part: Transformers.js doesn't expose per-layer hidden-state hooks for our gate-injection. Three viable architectures to pick between:
-  1. **ONNX graph modification.** Inject `Mul` nodes after each decoder layer's residual. Doable with `onnx` Python tooling; produces a custom int4 ONNX that ships with the artifact. ~2-3 sessions.
-  2. **neuropulse WGSL adoption.** Already runs Phi-3-mini forward in the browser. Port the gate-apply to WGSL and surface a per-layer hook point. Fastest runtime but deepest integration. ~2-3 sessions.
-  3. **Server-side forward via inference API.** Browser worker calls HuggingFace Inference Endpoints (or similar) for the Qwen forward; locally does only SPSA bookkeeping. Easy + slow + private-data concerns. Probably not the right call.
-- Decide on demo target: keep Qwen-0.5B (matches the gate artifact we baked) or rebake gates for a smaller base (Pythia-160M ~640 MB, fits a tab better) so the model-load time is bearable.
-- `public/ntk.html` + `public/ntk-worker.js` for the demo page.
-- Bump TARGET_PROPOSALS back to 2 in `src/tournament-ntk.ts` once browser workers are cheap enough to run several at once.
+**Phase 40 next-4-b session 2 plan (~3-4 hours, per `docs/PHASE_40_NEXT4B_QWEN_ONNX.md`):**
+1. Quantize: pick between in-repo int4 (~250 MB, requires onnxruntime's quantization toolchain) or adopt Xenova/Qwen2.5-0.5B-Instruct from HF (already int4, ~250 MB) and inject the 24 Mul nodes via ONNX graph surgery.
+2. Write `public/ntk-worker.js` — onnxruntime-web in browser, loads the quantized ONNX, computes per-trial gate_mults from raw[K] = exp(0.05·tanh(raw[slot])), runs forward with that, SPSA loop matching `scripts/ntk-verifier.py`.
+3. `public/ntk.html` demo page paralleling `head.html` / `lm.html`.
+4. Bump TARGET_PROPOSALS back to 2 in `src/tournament-ntk.ts` once browser workers are running.
+5. Optional fallback: ship gates for Pythia-160M (~160 MB int4) for memory-constrained tabs.
+
+**Phase 40 next-4-b session 1 deliverables (DONE):**
+- `scripts/export-qwen-with-gates.py` — torch.onnx.export wrapper with forward hooks; produces ONNX whose inputs include `gate_mults: [24, 896] float32`
+- `docs/PHASE_40_NEXT4B_QWEN_ONNX.md` — design + validation + session 2 plan
+- `.gitignore` now excludes `public/data/*.onnx` and `*.onnx.data` (the artifacts are too large to commit; ~1.8 GB total fp32)
+- `~/ntkmirror/.venv` has `onnx`, `onnxruntime`, `onnxscript` installed for future runs
 
 **Phase 40 next-4-a deliverables (DONE):**
 - `public/head-spsa-worker.js` — browser SPSA worker over the head-classifier MLP
