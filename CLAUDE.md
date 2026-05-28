@@ -46,13 +46,20 @@ _Updated: 2026-05-28 (Phases 39 + 39b shipped; sym-AIMD remains canonical; Phase
 - INTELLECT-3 (Prime Intellect, Nov 2025) went centralized — abandoned the decentralized story. "Anyone-can-join" frontier in mid-2026 = Nous DisTrO + Pluralis + postnet-cf + NTK-Mirror (the latter is single-machine but the gate parameterization is FL-shaped).
 - NTK-Mirror is brand new (May 23, 2026) but going viral fast. Combining it with postnet-cf + neuropulse is a "three-MIT-projects compose into one Cloudflare Worker that trains real LLM behavior across browser tabs" story — genuinely novel positioning.
 
-**The "obvious next move" if you say "go":** Phase 40 next-2 (per `docs/PHASE_40_NTKMIRROR_PLAN.md`). Phase 40 next-1 just shipped: gate-extraction Python script (`scripts/extract-ntk-gates.py`), TS gate-apply hook (`src/ntk-gate.ts`), first baked artifact (`public/data/qwen05b-math-gates-k5000.bin`, 40 KB), and a 16-check parity test (`scripts/test-ntk-gate-parse.mjs`) all passing.
+**The "obvious next move" if you say "go":** Phase 40 next-3 (loss oracle + browser worker). Next-2 just shipped: the federated DO (`src/tournament-ntk.ts`), a Python verifier (`scripts/ntk-verifier.py`) that drives real Qwen-0.5B forward passes with the gate-apply hook injected, and a successful R=30 run (loss 1.7632 → 1.7629, ‖θ‖ 0 → 0.044). See `docs/PHASE_40_NEXT2_NTK_DO.md`.
 
-**What next-2 looks like (~3 hours):**
-1. Write `src/tournament-ntk.ts` — fork `tournament-head-spsa-adaptive.ts` (Phase 39's sym-AIMD SPSA DO). Replace head-model imports with `ntk-gate.ts`. Constructor: fetch the gate artifact from ASSETS, parse via `parseGateArtifact`, build per-layer index. State: `theta = raw[K]` (the trainable gate values). The protocol layer stays IDENTICAL to Phase 39.
-2. Wire into `src/worker.ts` + `wrangler.jsonc` (new binding `TOURNAMENT_NTK`, migration v10).
-3. Write `scripts/ntk-verifier.mjs` — Node-side verifier. Uses Transformers.js to run Qwen-0.5B forward (with `applyGatesToStack` injecting our gates) for trial loss eval. 3 forwards per SPSA trial. ~150-600 ms per trial on M-series.
-4. First end-to-end run: R=50 against `wrangler dev`. Acceptance: federated training of the gate controller descends test loss on the math eval split.
+**What next-3 needs to bring back (deferred from next-2):**
+- **server-side test loss** — CF Worker can't load Qwen-0.5B. Three viable architectures: (a) "trusted auditor" companion service that posts test_loss to the DO per round; (b) shrink to a Worker-bundled tiny base model (Pythia-160M / DistilGPT-2) via Transformers.js — Phase 39's full sym-AIMD reactivates; (c) cross-worker verification — server asks ANOTHER worker to evaluate the post-apply theta; fraud = disagreement. (c) is novel; (a) is fastest.
+- **post-apply byzantine check** — needs server-side real_Δ.
+- **adaptive η (Phase 39 sym-AIMD)** — needs server-side real_Δ.
+- **TARGET_PROPOSALS = 2** (currently 1 in `src/tournament-ntk.ts` for solo dev; bump back to 2 once we have multiple cheap workers).
+- **a browser worker** — Python is the only Qwen runner we have today; next-3 should write a JS/WGSL worker that fits in a tab.
+
+**Phase 40 next-2 deliverables (DONE):**
+- `src/tournament-ntk.ts` — federated DO (K=5000 gates as trainable surface)
+- `src/worker.ts` + `wrangler.jsonc` — binding + migration v10
+- `scripts/ntk-verifier.py` — Python verifier using `ntkmirror`'s `_SignedLogMaskModule` to inject gates into Qwen-0.5B forward
+- `docs/PHASE_40_NEXT2_NTK_DO.md` — empirical writeup of the R=30 run
 
 **Phase 40 next-1 deliverables (DONE):**
 - `scripts/extract-ntk-gates.py` — emits binary artifact (32 B header + K × 8 B body)
