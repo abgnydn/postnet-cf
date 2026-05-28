@@ -491,3 +491,142 @@ Until then: the Qwen browser demo loads, downloads, caches, and
 aborts. The head-classifier browser demo (Phase 40 next-4-a) remains
 the fully-working "federated training in your browser tab"
 deliverable.
+
+---
+
+# Session 5 — it works.
+
+> _End-to-end federated LLM gate-controller training from a Chrome tab.
+> Real Qwen-0.5B-Instruct forward through onnxruntime-web, NTK-Mirror
+> gates injected via ONNX graph surgery on the optimum-cli export,
+> Phase 39 sym-AIMD adaptive η running on the coordinator._
+
+## The pipeline that finally worked
+
+```
+   1. optimum-cli export onnx \
+        -m Qwen/Qwen2.5-0.5B-Instruct \
+        --task text-generation --opset 17 --monolith \
+        --batch_size 1 --sequence_length 32 \
+        ~/postnet-cf-onnx/qwen05b-optimum/
+      → model.onnx (1.1 MB graph) + model.onnx_data (2.3 GB weights, fp32)
+      uses the canonical Xenova/Hugging-Face pipeline; ORT-web compatible
+
+   2. scripts/inject-gates-onnx.py
+      → ~/postnet-cf-onnx/qwen05b-with-gates-optimum.onnx
+        (1.1 MB graph + 2.4 GB data sidecar; same opset)
+      Adds a 4th input `gate_mults: [24, 896] float32` and splices 24
+      Mul nodes after each /model/layers.L/Add_1_output_0 residual.
+      Validated: 0.0e+00 logit diff vs base optimum ONNX at gate_mults=ones.
+
+   3. scripts/quantize-qwen-onnx.py
+      → ~/postnet-cf-onnx/qwen05b-with-gates-optimum-int8.onnx
+        (994 MB single file; no sidecar — fits in one ArrayBuffer)
+      int8 dynamic quantization of MatMul/Gemm; the gate-injected Mul
+      nodes are left untouched.
+
+   4. browser worker fetches the 994 MB ONNX, OPFS-skips (over 1.5 GB
+      safety margin we don't hit; cache works), loads into ORT-web 1.22
+      WASM EP, runs SPSA loop with audit_loss_before posted to /api/ntk/tick.
+```
+
+## Live empirical anchor (Chrome on M-series Mac)
+
+```
+   tab opens → click Join → ~10 sec download (localhost) → ORT init
+   → first forward ≈ 2-3 sec → SPSA loop running.
+
+   server-side after 4 rounds:
+     round=4
+     loss:  4.098 → 3.854    (Δ -0.244)
+     η:     1.0e-3 → 1.1e-3  (1 sym-AIMD grow event, 0 shrinks)
+     ||θ||: 0 → 0.87         (K=5000 gates moving)
+     max|θ|: 0 → 0.056       (some gates hit the max_log_gate=0.05 bound)
+     accept: 3 / 4           (1 round rejected by tournament — claimed Δ ≥ 0)
+
+   per-round time: ~30 sec in WASM single-threaded (12 forwards/round)
+   → 100 rounds ≈ 50 min in browser today
+```
+
+## Why the journey was 5 sessions long
+
+1. **session 1** (torch.onnx.export dynamo=True): produced an ONNX
+   that runs in Python ORT but aborts in ORT-web. We didn't discover
+   this until session 4.
+2. **session 2** (int8 quantize_dynamic): inherited session 1's
+   ONNX, so same abort. Validated quantization works; didn't fix
+   the underlying issue.
+3. **session 3** (browser worker code): wrote pure-protocol code,
+   couldn't validate without claude-in-chrome.
+4. **session 4** (live test in Chrome): discovered the abort. Tried
+   dynamo=False — produced a model with externalized weights pointing
+   to non-existent files. Concluded torch.onnx.export is the wrong tool.
+5. **session 5** (this session, the fix): optimum-cli for the export
+   (Xenova's proven pipeline) + ONNX graph surgery for our gates +
+   int8 quantization (post-surgery) for browser size. Works.
+
+## Three subtle issues we hit + resolved this session
+
+1. **optimum 2.x split exporters into a separate package** —
+   `optimum-onnx`. Without it, `optimum-cli export onnx` exits with
+   "unrecognized arguments." Pinned `pip install optimum-onnx 0.1.0`.
+
+2. **External-data sidecar handling in ORT-web** — passing only the
+   `.onnx` file makes ORT-web look for the sidecar at a hardcoded
+   relative path. Two fixes possible:
+     (a) pass the sidecar as `externalData` in SessionOptions, OR
+     (b) quantize the file down enough that protobuf can inline all weights
+   We use (b) — int8 quantization produces a 994 MB **single file**.
+
+3. **Chrome ArrayBuffer max is ~2 GB** — the 2.4 GB fp32 sidecar
+   couldn't even be materialized via `await blob.arrayBuffer()`. The
+   `NotReadableError` looked like an OPFS issue but was actually
+   the ArrayBuffer allocation rejecting at fetch time. The 994 MB
+   int8 file sails through.
+
+## What's deployed-ready vs deferred
+
+**Deployed-ready (locally):**
+- The full pipeline from URL → click → 4-input ORT session → SPSA loop
+- Phase 39 sym-AIMD adaptive η running on Qwen training
+- Audit-based byzantine defense alive (no in-browser attacker yet)
+
+**Deferred to a future session:**
+- HF Hub upload of the 994 MB ONNX (right now hosted on local :8788)
+- Bump TARGET_PROPOSALS = 2 (multi-tab federation)
+- WebGPU EP attempt (~3-5× speedup if it loads our model)
+- Longer empirical run (R=200+) for paper-grade numbers
+- In-browser attacker scaffold for live byzantine demo
+
+## Reproducing session 5
+
+```bash
+# install the optimum onnx exporter (separate package in optimum 2.x):
+~/ntkmirror/.venv/bin/pip install optimum-onnx
+
+# 3-step pipeline:
+~/ntkmirror/.venv/bin/optimum-cli export onnx \
+  -m Qwen/Qwen2.5-0.5B-Instruct \
+  --task text-generation --opset 17 --monolith \
+  --batch_size 1 --sequence_length 32 \
+  ~/postnet-cf-onnx/qwen05b-optimum/
+
+~/ntkmirror/.venv/bin/python scripts/inject-gates-onnx.py
+# → ~/postnet-cf-onnx/qwen05b-with-gates-optimum.onnx (+_data)
+
+~/ntkmirror/.venv/bin/python scripts/quantize-qwen-onnx.py \
+  --in ~/postnet-cf-onnx/qwen05b-with-gates-optimum.onnx \
+  --out ~/postnet-cf-onnx/qwen05b-with-gates-optimum-int8.onnx
+# → 994 MB single file
+
+# terminal 1:
+cd ~/postnet-cf && npm run dev
+
+# terminal 2:
+cd ~/postnet-cf-onnx && npx http-server -p 8788 --cors -c-1 .
+
+# open http://localhost:8787/ntk.html
+# expect: ~10 sec download (localhost), ~5-10 sec ORT init,
+#         loss starts at ~4.1, descends to ~3.8 over first 4 rounds,
+#         η climbs from 1.0e-3 as sym-AIMD grow events fire.
+```

@@ -61,8 +61,14 @@ const _qsOnnx = (() => {
   if (typeof location === "undefined") return null;
   return new URLSearchParams(location.search).get("onnx");
 })();
-const ONNX_URL = _qsOnnx || "http://localhost:8788/qwen05b-with-gates-int8.onnx";
-const ONNX_OPFS_NAME = "qwen05b-with-gates-int8.onnx";
+// Phase 40 next-4-b session 5: optimum-cli + scripts/inject-gates-onnx.py
+// produced a 2.4 GB fp32 ONNX that ORT-web aborted on (load step), and
+// Chrome's ArrayBuffer max ~2 GB prevented loading the sidecar anyway.
+// We int8-quantize-dynamic the gated ONNX → 994 MB single file (no sidecar),
+// fits in one ArrayBuffer, and ORT-web 1.22 loads it.
+const ONNX_URL = _qsOnnx || "http://localhost:8788/qwen05b-with-gates-optimum-int8.onnx";
+const ONNX_DATA_URL = null;       // single-file int8 — no sidecar needed
+const ONNX_OPFS_NAME = "qwen05b-with-gates-optimum-int8.onnx";
 
 const K = 5000;
 const N_LAYERS = 24;
@@ -89,10 +95,13 @@ const SEQ_LEN = TOKEN_IDS[0].length;
 // Flatten to row-major Int64 typed-arrays (ORT expects BigInt64 for int64).
 const inputIdsFlat = new BigInt64Array(BATCH * SEQ_LEN);
 const attnMaskFlat = new BigInt64Array(BATCH * SEQ_LEN);
+// optimum-cli's text-generation export expects position_ids too.
+const positionIdsFlat = new BigInt64Array(BATCH * SEQ_LEN);
 for (let b = 0; b < BATCH; b++) {
   for (let t = 0; t < SEQ_LEN; t++) {
     inputIdsFlat[b * SEQ_LEN + t] = BigInt(TOKEN_IDS[b][t]);
     attnMaskFlat[b * SEQ_LEN + t] = 1n;
+    positionIdsFlat[b * SEQ_LEN + t] = BigInt(t);
   }
 }
 // Labels for causal-LM loss: predict token t+1 given tokens [0..t].
@@ -160,22 +169,27 @@ function fillGateMults(raw, artifact) {
 
 // ─── OPFS-cached ONNX loader (so the 866 MB download happens once) ──
 
-async function loadOnnxToOpfs(progressFn) {
+// Chrome's OPFS createWritable.write() rejects buffers above ~2 GB
+// (FileSystemSyncAccessHandle error). For files that big, we skip the
+// cache and just keep them in memory — slower across reloads, but the
+// alternative is a partial-write that fails on read.
+const OPFS_MAX_BYTES = 1.5 * 1024 * 1024 * 1024;   // 1.5 GB safety margin
+
+async function _loadOneToOpfs(url, opfsName, progressFn, label) {
   const root = await navigator.storage.getDirectory();
-  let file;
   try {
-    const fh = await root.getFileHandle(ONNX_OPFS_NAME, { create: false });
-    file = await fh.getFile();
-    if (file.size > 100 * 1024 * 1024) {
-      progressFn(`OPFS hit: ${ONNX_OPFS_NAME} (${(file.size / 1024 / 1024).toFixed(0)} MB)`);
+    const fh = await root.getFileHandle(opfsName, { create: false });
+    const file = await fh.getFile();
+    if (file.size > 1024) {
+      progressFn(`OPFS hit ${label}: ${(file.size / 1024 / 1024).toFixed(0)} MB`);
       return await file.arrayBuffer();
     }
   } catch {
     // fall through to download
   }
-  progressFn(`downloading ${ONNX_URL} ...`);
-  const resp = await fetch(ONNX_URL);
-  if (!resp.ok) throw new Error(`ONNX fetch ${resp.status}`);
+  progressFn(`downloading ${label}...`);
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error(`${label} fetch ${resp.status}`);
   const total = Number(resp.headers.get("content-length")) || 0;
   const chunks = [];
   const reader = resp.body.getReader();
@@ -185,31 +199,44 @@ async function loadOnnxToOpfs(progressFn) {
     if (done) break;
     chunks.push(value);
     received += value.length;
-    if (total) progressFn(`downloading: ${(received / 1024 / 1024).toFixed(0)} / ${(total / 1024 / 1024).toFixed(0)} MB (${(100 * received / total).toFixed(0)}%)`);
-    else       progressFn(`downloading: ${(received / 1024 / 1024).toFixed(0)} MB`);
+    if (total) progressFn(`${label}: ${(received / 1024 / 1024).toFixed(0)} / ${(total / 1024 / 1024).toFixed(0)} MB (${(100 * received / total).toFixed(0)}%)`);
+    else       progressFn(`${label}: ${(received / 1024 / 1024).toFixed(0)} MB`);
   }
   const blob = new Blob(chunks);
   const buf = await blob.arrayBuffer();
-  // Persist to OPFS for next session
+  if (buf.byteLength > OPFS_MAX_BYTES) {
+    progressFn(`${label} too large for OPFS (${(buf.byteLength / 1024 / 1024).toFixed(0)} MB > ${(OPFS_MAX_BYTES / 1024 / 1024).toFixed(0)} MB); keeping in memory only`);
+    return buf;
+  }
   try {
-    const fh = await root.getFileHandle(ONNX_OPFS_NAME, { create: true });
+    const fh = await root.getFileHandle(opfsName, { create: true });
     const w = await fh.createWritable();
     await w.write(buf);
     await w.close();
-    progressFn(`cached to OPFS (${(buf.byteLength / 1024 / 1024).toFixed(0)} MB)`);
+    progressFn(`cached ${label} to OPFS (${(buf.byteLength / 1024 / 1024).toFixed(0)} MB)`);
   } catch (e) {
-    progressFn(`OPFS write failed (${e.message}); model is in memory only`);
+    progressFn(`OPFS write of ${label} failed (${e.message}); in memory only`);
   }
   return buf;
 }
 
+// Single-file int8 ONNX after our int8 quantization pass.
+async function loadOnnxToOpfs(progressFn) {
+  const graph = await _loadOneToOpfs(ONNX_URL, ONNX_OPFS_NAME, progressFn, "model");
+  return { graph, data: null };
+}
+
 let ortSession = null;
-async function initOrtSession(onnxBuf, progressFn) {
+async function initOrtSession(onnxBufs, progressFn) {
   progressFn("initializing ORT session...");
-  ortSession = await ort.InferenceSession.create(onnxBuf, {
-    executionProviders: ["wasm"],   // WebGPU EP would be faster but compatibility-fragile
+  const opts = {
+    executionProviders: ["wasm"],
     graphOptimizationLevel: "all",
-  });
+  };
+  if (onnxBufs.data) {
+    opts.externalData = [{ data: new Uint8Array(onnxBufs.data), path: "weights.bin" }];
+  }
+  ortSession = await ort.InferenceSession.create(new Uint8Array(onnxBufs.graph), opts);
   progressFn(`ORT ready. inputs=${ortSession.inputNames.join(", ")}, outputs=${ortSession.outputNames.join(", ")}`);
 }
 
@@ -218,9 +245,10 @@ async function initOrtSession(onnxBuf, progressFn) {
 async function forwardLoss(raw, artifact) {
   fillGateMults(raw, artifact);
   const feeds = {
-    input_ids:      new ort.Tensor("int64",   inputIdsFlat,  [BATCH, SEQ_LEN]),
-    attention_mask: new ort.Tensor("int64",   attnMaskFlat,  [BATCH, SEQ_LEN]),
-    gate_mults:     new ort.Tensor("float32", gateMultsBuf,  [N_LAYERS, HIDDEN_SIZE]),
+    input_ids:      new ort.Tensor("int64",   inputIdsFlat,    [BATCH, SEQ_LEN]),
+    attention_mask: new ort.Tensor("int64",   attnMaskFlat,    [BATCH, SEQ_LEN]),
+    position_ids:   new ort.Tensor("int64",   positionIdsFlat, [BATCH, SEQ_LEN]),
+    gate_mults:     new ort.Tensor("float32", gateMultsBuf,    [N_LAYERS, HIDDEN_SIZE]),
   };
   const out = await ortSession.run(feeds);
   const logits = out.logits.data;                // Float32Array, [BATCH, SEQ_LEN, V]
@@ -469,8 +497,8 @@ async function runForever() {
   // Heavy init: artifact, ONNX, ORT session, server snapshot.
   artifact = await loadGateArtifact();
   log(`gate artifact loaded (${(artifact.bytes / 1024).toFixed(1)} KB)`);
-  const onnxBuf = await loadOnnxToOpfs(setProgress);
-  await initOrtSession(new Uint8Array(onnxBuf), setProgress);
+  const onnxBufs = await loadOnnxToOpfs(setProgress);
+  await initOrtSession(onnxBufs, setProgress);
   await bootstrapSnapshot();
   openWebSocket();
 

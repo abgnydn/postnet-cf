@@ -84,7 +84,8 @@ All four pages are independent Durable Objects sharing the same Cloudflare proje
 | 40-4b-s1 | Qwen+gates ONNX export — `scripts/export-qwen-with-gates.py` produces a Qwen-0.5B-Instruct ONNX with per-layer gate multipliers as a forward input; validated zero-diff vs base PyTorch at all-ones gates (see `docs/PHASE_40_NEXT4B_QWEN_ONNX.md`) | `e36765a` |
 | 40-4b-s2 | int8 quantization — `scripts/quantize-qwen-onnx.py` shrinks the Qwen+gates ONNX from 1.8 GB to 866 MB (3.7× faster forward) with top-1 token agreement preserved; int4 deferred (separate tooling) | `57b83ee` |
 | 40-4b-s3 | NTK browser worker + demo page — `public/ntk.html` + `public/ntk-worker.js` (onnxruntime-web in browser, OPFS cache for the 866 MB ONNX, SPSA loop mirroring `scripts/ntk-verifier.py`); locally testable, HF Hub hosting documented for prod | `b10579c` |
-| 40-4b-s4 | Live-test in Chrome — discovered ORT-web can't execute torch.onnx.export's output for Qwen (Aborted() in WASM and WebGPU EPs both); browser pipeline is correct but the artifact pipeline needs optimum-cli + ONNX surgery (see `docs/PHASE_40_NEXT4B_QWEN_ONNX.md` "session 4") | _uncommitted_ |
+| 40-4b-s4 | Live-test in Chrome — discovered ORT-web can't execute torch.onnx.export's output for Qwen (Aborted() in WASM and WebGPU EPs both); browser pipeline is correct but the artifact pipeline needs optimum-cli + ONNX surgery (see `docs/PHASE_40_NEXT4B_QWEN_ONNX.md` "session 4") | `f5a13c4` |
+| 40-4b-s5 | **It works.** optimum-cli + `scripts/inject-gates-onnx.py` + int8 quantize → 994 MB single-file ONNX. Chrome tab loads it, ORT-web runs forward + SPSA loop end-to-end. R=4: loss 4.10→3.85, sym-AIMD η grew 1.0e-3→1.1e-3 | _uncommitted_ |
 
 Each phase ships a real change to the protocol or the demo and is documented either in `docs/` or in a per-phase commit message that includes the empirical result.
 

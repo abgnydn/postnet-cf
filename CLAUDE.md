@@ -46,14 +46,18 @@ _Updated: 2026-05-28 (Phases 39 + 39b shipped; sym-AIMD remains canonical; Phase
 - INTELLECT-3 (Prime Intellect, Nov 2025) went centralized — abandoned the decentralized story. "Anyone-can-join" frontier in mid-2026 = Nous DisTrO + Pluralis + postnet-cf + NTK-Mirror (the latter is single-machine but the gate parameterization is FL-shaped).
 - NTK-Mirror is brand new (May 23, 2026) but going viral fast. Combining it with postnet-cf + neuropulse is a "three-MIT-projects compose into one Cloudflare Worker that trains real LLM behavior across browser tabs" story — genuinely novel positioning.
 
-**The "obvious next move" if you say "go":** Phase 40 next-4-b session 5 — fix the artifact pipeline via optimum-cli + ONNX surgery. Session 4 live-tested in Chrome and discovered ORT-web can't execute torch.onnx.export's output for Qwen (Aborted() in both WASM and WebGPU EPs). The browser worker code is structurally correct (verified MiniLM loads in the same environment); the bug is in how we produce the ONNX. See `docs/PHASE_40_NEXT4B_QWEN_ONNX.md` "Session 4" for the diagnostic trail.
+**The "obvious next move" if you say "go":** Phase 40 next-5 — polish + scale. The federated-LLM-in-a-browser-tab works end-to-end (`public/ntk.html` + local 994 MB ONNX). Five real moves remaining:
+1. **HF Hub upload of the 994 MB ONNX** so the public URL works without a local http-server. `huggingface-cli upload <user>/postnet-qwen05b-gates qwen05b-with-gates-optimum-int8.onnx`. Then flip `ONNX_URL` default in `public/ntk-worker.js`.
+2. **Bump TARGET_PROPOSALS = 2** in `src/tournament-ntk.ts` once two tabs can be open at once.
+3. **Try WebGPU EP** in `ntk-worker.js` (1-line change; ~3-5× speedup if our int8 ops run on GPU).
+4. **Longer empirical run** (R=200+) and writeup in style of `PHASE_37_SCALING.md` / `PHASE_39_ADAPTIVE_ETA.md`.
+5. **In-browser attacker scaffold** to live-demo Phase 39 byzantine defense on the Qwen pipeline.
 
-**Phase 40 next-4-b session 5 plan (~half day):**
-1. `pip install "optimum[exporters]"`; `optimum-cli export onnx --model Qwen/Qwen2.5-0.5B-Instruct --task text-generation --opset 17 ~/postnet-cf-onnx/qwen05b-optimum/`. Produces a clean Xenova-style ONNX guaranteed to load in ORT-web.
-2. `scripts/inject-gates-onnx.py` — load the optimum-cli output, find each of the 24 decoder-layer residual outputs, insert a Mul node consuming a new `gate_mults: [24, 896] float32` input. Save modified ONNX. ~150-300 LOC.
-3. Re-test in Chrome — the browser worker should now load + run forward + execute the SPSA loop end-to-end.
-4. After validation: HF Hub upload, flip ONNX_URL default in `public/ntk-worker.js`.
-5. Then: TARGET_PROPOSALS=2, WebGPU EP, longer empirical run (R=200+).
+**Phase 40 next-4-b session 5 deliverables (DONE — end-to-end works):**
+- Pipeline: `optimum-cli` (export) → `scripts/inject-gates-onnx.py` (Mul surgery) → `scripts/quantize-qwen-onnx.py` (int8 single file). Output: 994 MB single-file ONNX, ORT-web compatible.
+- `public/ntk-worker.js`: updated to fetch the int8 ONNX, send `position_ids` (optimum-cli's 4th expected input), OPFS-cache with a 1.5 GB safety margin (Chrome's `blob.arrayBuffer()` rejects ≥2 GB; the 994 MB int8 file is the sweet spot).
+- Live R=4 in Chrome: loss 4.10 → 3.85, η grew 1.0e-3 → 1.1e-3 (one sym-AIMD grow event), 3/4 proposals accepted by tournament.
+- `docs/PHASE_40_NEXT4B_QWEN_ONNX.md` "Session 5" section: full pipeline reproducer + diagnostics for the three subtle issues we hit (optimum-onnx split package, external-data sidecar handling, ArrayBuffer max).
 
 **Phase 40 next-4-b session 4 findings (DONE — negative result):**
 - Architecture confirmed end-to-end: ONNX downloads, OPFS caches, ORT-web initializes session against our model (correct input/output names).
