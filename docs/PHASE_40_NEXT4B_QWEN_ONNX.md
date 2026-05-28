@@ -382,3 +382,112 @@ cd ~/postnet-cf-onnx && npx http-server -p 8788 --cors -c-1 .
 
 # open http://localhost:8787/ntk.html
 ```
+
+---
+
+# Session 4 — live test in Chrome (the negative result)
+
+> _Driving the user's Chrome via claude-in-chrome. The infrastructure
+> works end-to-end except for one critical incompatibility we
+> discovered: ORT-web cannot execute our torch-exported Qwen ONNX._
+
+## What worked
+
+```
+   ✓ wrangler dev serves the protocol + small assets             (port 8787)
+   ✓ http-server in ~/postnet-cf-onnx/ serves the big ONNX       (port 8788)
+   ✓ browser fetches the 866 MB int8 ONNX in ~3 s on localhost
+   ✓ OPFS caches the ONNX (next reload is instant)
+   ✓ ORT-web (1.22.0) initializes session against the ONNX
+   ✓ session.inputNames = ['input_ids', 'attention_mask', 'gate_mults'] ✓
+   ✓ session.outputNames = ['logits'] ✓
+```
+
+So the architecture is correctly wired through to `InferenceSession.create()`.
+We even verified ORT-web works in this environment by loading an
+unrelated Xenova-published MiniLM ONNX (21.9 MB, init in 80 ms).
+
+## What broke
+
+```
+   on first session.run({input_ids, attention_mask, gate_mults}):
+     RuntimeError: Aborted(). Build with -sASSERTIONS for more info.
+     stack: at ...ort-wasm-simd-threaded.jsep.mjs ... wasm:wasm-function[1270]:0x166946
+   
+   reproduced identically across:
+     ✗ WASM EP
+     ✗ WebGPU EP
+     ✗ batch=4 seq=32
+     ✗ batch=1 seq=10 (tiny)
+     ✗ fp32 model (no quantization)
+     ✗ int8 model (after quantize_dynamic)
+```
+
+So the issue is NOT:
+- quantization (fp32 fails the same way)
+- input shapes (tiny inputs fail too)
+- the EP (both EPs fail)
+- the environment (Xenova's MiniLM ONNX works fine)
+
+The issue IS:
+- **the ONNX graph our torch exporter produces is not executable by ORT-web 1.22**
+- the exact failing op is hidden behind a `-sASSERTIONS` flag we'd need to rebuild ORT-web to see.
+
+## Why the legacy exporter (dynamo=False) doesn't save us either
+
+We tried switching `torch.onnx.export(..., dynamo=False)` thinking the
+legacy tracer would produce more ORT-web-friendly output. It produced
+a 1.4 MB ONNX with **170 initializers externalized to per-tensor files
+that torch never actually wrote**:
+
+```
+   first 5 initializers:
+     base.model.embed_tokens.weight       → ext file 'base.model.embed_tokens.weight'   ← MISSING
+     base.model.layers.0.self_attn.q_proj.bias  → INLINE, 3584 B
+     ...
+```
+
+The validation in the Python script "passed" because PyTorch had the
+weights still in memory — but the on-disk ONNX has no weights for ~58%
+of initializers. Broken artifact.
+
+## The real path forward (session 5)
+
+Stop fighting `torch.onnx.export` for Qwen. The well-trodden path that
+produces ORT-web-compatible ONNX is **optimum-cli** (the same pipeline
+Xenova uses for all the Transformers.js models):
+
+```bash
+~/ntkmirror/.venv/bin/pip install "optimum[exporters]"
+~/ntkmirror/.venv/bin/optimum-cli export onnx \
+    --model Qwen/Qwen2.5-0.5B-Instruct \
+    --task text-generation \
+    --opset 17 \
+    ~/postnet-cf-onnx/qwen05b-optimum/
+```
+
+This produces a clean ONNX that ORT-web is guaranteed to be able to
+load and run (proven empirically by everything in Xenova's HF
+collection).
+
+The catch: optimum-cli doesn't know about our gates. So **session 5's
+job is ONNX surgery**: load optimum-cli's output, insert 24 `Mul`
+nodes after each decoder layer (consuming a new `gate_mults`
+input of shape [24, 896]), save the modified ONNX.
+
+The Mul-injection is straightforward with `onnx` Python tooling:
+identify each `LayerNorm`-like residual stream output, splice a Mul
+in before the next layer consumes it. ~150-300 lines of Python.
+
+## Status flag
+
+The browser worker (`public/ntk-worker.js`) and demo page
+(`public/ntk.html`) are **structurally correct**. The bug is entirely
+in the artifact-production pipeline. When session 5 ships the
+optimum-cli + ONNX-surgery pipeline, the browser side should just
+work without changes.
+
+Until then: the Qwen browser demo loads, downloads, caches, and
+aborts. The head-classifier browser demo (Phase 40 next-4-a) remains
+the fully-working "federated training in your browser tab"
+deliverable.

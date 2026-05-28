@@ -165,6 +165,17 @@ def main() -> int:
     args.out.parent.mkdir(parents=True, exist_ok=True)
     print(f"\nexporting to {args.out}  (opset {args.opset})...")
     t0 = time.time()
+    # Two paths through torch.onnx.export, neither is great for ORT-web 1.22
+    # at present — see docs/PHASE_40_NEXT4B_QWEN_ONNX.md "session 4 finding":
+    #   dynamo=True  (default in torch 2.12): runs in Python ORT but ORT-web
+    #                                          aborts in WASM and WebGPU EPs
+    #                                          (op-coverage gap). 1.8 GB output.
+    #   dynamo=False (legacy):                 externalizes large weights into
+    #                                          per-tensor sidecar files that are
+    #                                          NOT actually written → broken ONNX.
+    # We default to dynamo=True (at least Python ORT can run it for our session-2
+    # int8 quantization pipeline). For session 5 the right answer is to switch
+    # to optimum-cli + ONNX surgery to inject the 24 Mul nodes.
     torch.onnx.export(
         wrapper,
         (input_ids, attention_mask, gate_mults_ones),

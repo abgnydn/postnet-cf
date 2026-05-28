@@ -46,14 +46,26 @@ _Updated: 2026-05-28 (Phases 39 + 39b shipped; sym-AIMD remains canonical; Phase
 - INTELLECT-3 (Prime Intellect, Nov 2025) went centralized — abandoned the decentralized story. "Anyone-can-join" frontier in mid-2026 = Nous DisTrO + Pluralis + postnet-cf + NTK-Mirror (the latter is single-machine but the gate parameterization is FL-shaped).
 - NTK-Mirror is brand new (May 23, 2026) but going viral fast. Combining it with postnet-cf + neuropulse is a "three-MIT-projects compose into one Cloudflare Worker that trains real LLM behavior across browser tabs" story — genuinely novel positioning.
 
-**The "obvious next move" if you say "go":** Phase 40 next-4-b session 4 — actually run the demo end-to-end in a real browser, then ship to prod. Session 3 wrote the browser code (`public/ntk.html` + `public/ntk-worker.js`) but couldn't validate it in-session (no claude-in-chrome).
+**The "obvious next move" if you say "go":** Phase 40 next-4-b session 5 — fix the artifact pipeline via optimum-cli + ONNX surgery. Session 4 live-tested in Chrome and discovered ORT-web can't execute torch.onnx.export's output for Qwen (Aborted() in both WASM and WebGPU EPs). The browser worker code is structurally correct (verified MiniLM loads in the same environment); the bug is in how we produce the ONNX. See `docs/PHASE_40_NEXT4B_QWEN_ONNX.md` "Session 4" for the diagnostic trail.
 
-**Phase 40 next-4-b session 4 plan:**
-1. **User validation:** terminal 1 = `npm run dev`; terminal 2 = `cd ~/postnet-cf-onnx && npx http-server -p 8788 --cors -c-1 .`; open http://localhost:8787/ntk.html. Click Join, watch progress (download → ORT session → first forward → SPSA loop). Confirm loss descends.
-2. **HF Hub upload of the 866 MB int8 ONNX** so prod doesn't depend on a sibling local server. Instructions in `docs/PHASE_40_NEXT4B_QWEN_ONNX.md`. After upload, flip `ONNX_URL` default in `public/ntk-worker.js`.
-3. **Bump TARGET_PROPOSALS = 2** in `src/tournament-ntk.ts` once we know two browser tabs can run concurrently.
-4. **WebGPU EP** (1-line change in worker; ~3-5× speedup if compatible).
-5. **Longer empirical run** (R=200+) + writeup similar to Phase 37 crossover or Phase 39 sym-AIMD.
+**Phase 40 next-4-b session 5 plan (~half day):**
+1. `pip install "optimum[exporters]"`; `optimum-cli export onnx --model Qwen/Qwen2.5-0.5B-Instruct --task text-generation --opset 17 ~/postnet-cf-onnx/qwen05b-optimum/`. Produces a clean Xenova-style ONNX guaranteed to load in ORT-web.
+2. `scripts/inject-gates-onnx.py` — load the optimum-cli output, find each of the 24 decoder-layer residual outputs, insert a Mul node consuming a new `gate_mults: [24, 896] float32` input. Save modified ONNX. ~150-300 LOC.
+3. Re-test in Chrome — the browser worker should now load + run forward + execute the SPSA loop end-to-end.
+4. After validation: HF Hub upload, flip ONNX_URL default in `public/ntk-worker.js`.
+5. Then: TARGET_PROPOSALS=2, WebGPU EP, longer empirical run (R=200+).
+
+**Phase 40 next-4-b session 4 findings (DONE — negative result):**
+- Architecture confirmed end-to-end: ONNX downloads, OPFS caches, ORT-web initializes session against our model (correct input/output names).
+- But: `session.run()` aborts with raw WASM trap on first call, identical across WASM + WebGPU EPs, identical across fp32 + int8, identical at any batch×seq size.
+- Diagnosed by loading Xenova/all-MiniLM-L6-v2 (21.9 MB int8 ONNX) in the same environment — works perfectly. So ORT-web is fine; our torch-produced ONNX has an op-coverage or graph-shape issue ORT-web doesn't handle.
+- Tried `torch.onnx.export(..., dynamo=False)` (legacy tracer): produces a 1.4 MB ONNX with externalized initializers referring to FILES THAT WERE NEVER WRITTEN (broken artifact, ~58% of weights missing).
+- Conclusion: `torch.onnx.export` is the wrong tool for ORT-web compatible Qwen ONNX. Need optimum-cli (the proven Xenova path) + post-hoc graph surgery to inject our 24 Mul nodes.
+
+**Phase 40 next-4-b session 3 deliverables (DONE):**
+- `public/ntk-worker.js` (~580 LOC) — structurally correct; will work once session 5 ships the right ONNX.
+- `public/ntk.html` — demo page; works (loads worker, shows download progress, errors on forward as expected given session-4 finding).
+- ONNX moved to `~/postnet-cf-onnx/`; sibling http-server pattern documented.
 
 **Phase 40 next-4-b session 3 deliverables (DONE):**
 - `public/ntk-worker.js` (~580 LOC) — ESM, onnxruntime-web from CDN, OPFS-cached 866 MB ONNX, SPSA loop mirroring Python verifier 1:1, baked tokenized math corpus.
