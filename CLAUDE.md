@@ -4,9 +4,9 @@ postnet-cf: federated tournament protocol on Cloudflare Workers. 34 phases shipp
 
 ## 🎯 Resume here (on "continue")
 
-_Updated: 2026-05-28 (Phase 39 shipped; Phase 40 plan revised to NTK-Mirror integration)_
+_Updated: 2026-05-28 (Phases 39 + 39b shipped; sym-AIMD remains canonical; Phase 40 plan = NTK-Mirror integration)_
 
-**Where we are.** Phase 39 shipped: adaptive η on the SPSA tournament. Tested two rules on the Phase 38 head-classifier (P=49 796). Asymmetric AIMD (×1.05 / ×0.7) collapsed η 16× and underperformed fixed-η. **Symmetric AIMD (×1.05 / ×1/1.05) won decisively at R=90: loss 1.40→1.12 (vs fixed-η 1.40→1.30 at R=100, i.e. 1.84× more descent), accuracy 32% → 56% (vs fixed-η 40%, +16 pp).** MEAZO's 2026 claim — that a single global scalar η matters more than per-param adaptivity — is supported at our scale. Wire format unchanged (η rides /tick responses). See `docs/PHASE_39_ADAPTIVE_ETA.md`.
+**Where we are.** Phase 39 + 39b shipped: a head-to-head of three η-adaptation rules on the Phase 38 head-classifier (P=49 796). **Symmetric AIMD (Phase 39, ×1.05 / ×1/1.05)** won decisively: at R=90, loss 1.40→1.12 and acc 32%→56% (vs fixed-η's 1.30 / 40% at R=100). **Adam-on-scalar (Phase 39b, MEAZO-faithful)** with textbook hyperparams underperforms — its step normalization caps the effective step magnitude near `lr`, while sym-AIMD lets η drift up unboundedly. MEAZO's "single global scalar matters most" framing is empirically supported; the SHAPE of the adaptation matters more than its sophistication. Sym-AIMD is the canonical Phase 39 algorithm. See `docs/PHASE_39_ADAPTIVE_ETA.md` and `docs/PHASE_39B_ADAM_ON_SCALAR.md`.
 
 **Files staged but uncommitted (as of 2026-05-28):**
 
@@ -14,7 +14,8 @@ _Updated: 2026-05-28 (Phase 39 shipped; Phase 40 plan revised to NTK-Mirror inte
 - `src/tournament-lm-big.ts` — flip-and-accept at the big scale (control) [Phase 37]
 - `src/tournament-head-flip.ts` + `src/tournament-head-spsa.ts` + `src/head-model.ts` — head-classifier DOs + shared model [Phase 38]
 - `src/tournament-head-spsa-adaptive.ts` + `scripts/head-spsa-adaptive-verifier.mjs` + `docs/PHASE_39_ADAPTIVE_ETA.md` — adaptive-η variant [Phase 39]
-- `src/worker.ts` + `wrangler.jsonc` — bindings + migrations (now 7 tournament DOs total)
+- `src/tournament-head-spsa-adam.ts` + `scripts/head-spsa-adam-verifier.mjs` + `docs/PHASE_39B_ADAM_ON_SCALAR.md` — Adam-on-scalar variant [Phase 39b]
+- `src/worker.ts` + `wrangler.jsonc` — bindings + migrations (now 8 tournament DOs total)
 - `public/lm-webgpu-scorer.js` + `public/lm-parity.html` — WebGPU substrate (Phase 35; parity ✓, 0.55× speed on tiny model)
 - `public/spsa-lm-worker.js` + `public/spsa-lm.html` — browser SPSA worker + demo page
 - `public/data/agnews-mini.bin` — 100-example MiniLM features (~154 KB) [Phase 38]

@@ -18,7 +18,8 @@
       { "name": "TOURNAMENT_SPSA_LM_BIG", "class_name": "TournamentSpsaLMBig" },
       { "name": "TOURNAMENT_HEAD_FLIP", "class_name": "TournamentHeadFlip" },
       { "name": "TOURNAMENT_HEAD_SPSA", "class_name": "TournamentHeadSpsa" },
-      { "name": "TOURNAMENT_HEAD_SPSA_ADAPTIVE", "class_name": "TournamentHeadSpsaAdaptive" }
+      { "name": "TOURNAMENT_HEAD_SPSA_ADAPTIVE", "class_name": "TournamentHeadSpsaAdaptive" },
+      { "name": "TOURNAMENT_HEAD_SPSA_ADAM", "class_name": "TournamentHeadSpsaAdam" }
     ]
   },
   "migrations": [
@@ -53,6 +54,10 @@
     {
       "tag": "v8",
       "new_sqlite_classes": ["TournamentHeadSpsaAdaptive"]
+    },
+    {
+      "tag": "v9",
+      "new_sqlite_classes": ["TournamentHeadSpsaAdam"]
     }
   ],
   "r2_buckets": [

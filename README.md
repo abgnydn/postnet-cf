@@ -76,6 +76,7 @@ All four pages are independent Durable Objects sharing the same Cloudflare proje
 | 37 | Scaling crossover empirical — SPSA wins past P ~ 30K (see `docs/PHASE_37_SCALING.md`) | _uncommitted_ |
 | 38 | Federated head-classifier on real MiniLM features — SPSA outperforms flip-and-accept at P=50K, real downstream task (see `docs/PHASE_38_HEAD.md`) | _uncommitted_ |
 | 39 | Adaptive η on SPSA tournament — symmetric AIMD beats fixed-η: 1.84× loss descent, +16 pp acc (R=90). MEAZO claim supported (see `docs/PHASE_39_ADAPTIVE_ETA.md`) | _uncommitted_ |
+| 39b | Adam-on-scalar (MEAZO-faithful) — bounded step caps at lr; loses to sym-AIMD with default hyperparams (see `docs/PHASE_39B_ADAM_ON_SCALAR.md`) | _uncommitted_ |
 
 Each phase ships a real change to the protocol or the demo and is documented either in `docs/` or in a per-phase commit message that includes the empirical result.
 
