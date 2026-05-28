@@ -51,13 +51,23 @@ export interface Env {
 // flip this constant (or eventually parameterize the DO via idFromName).
 const ARTIFACT_URL = "http://internal/data/qwen05b-math-gates-k5000.bin";
 
-// Protocol constants (identical to Phase 36+ except TARGET).
+// Protocol constants.
 const EPSILON = 0.005;            // SPSA perturbation magnitude
-const ETA = 0.001;                // fixed step size (Phase 38 style)
-// TARGET = 1 for Phase 40 next-2 dev: the Python verifier (only Qwen-runner
-// we have in this phase) is heavy enough that running 2+ in parallel
-// pressures the 16-GB Mac. Bump to 2 in next-3 once we have a lighter
-// browser worker via Transformers.js or neuropulse WGSL.
+const ETA_INIT = 0.001;           // initial step size; ADAPTED per Phase 39 sym-AIMD
+// Phase 39's symmetric AIMD multipliers — log-symmetric so η drifts based on
+// the IMBALANCE of grow vs shrink events (typically ~70%-grow rate → η drifts up).
+const ETA_UP = 1.05;
+const ETA_DOWN = 1 / 1.05;
+const ETA_MIN = 1e-5;
+const ETA_MAX = 0.1;
+// Phase 40 next-3: 1e-5 (tighter than Phase 39's 1e-4) because gate-controller
+// per-round Δloss is tiny at init — gates start at zero so the model is
+// effectively the base model and small θ steps barely shift loss. With this
+// threshold the audit signal lifts above noise within ~10 rounds.
+const ETA_DELTA_THRESH = 1e-5;
+// TARGET = 1 for Phase 40 next-2/3 dev: the Python verifier (only Qwen-runner
+// we have today) is heavy enough that running 2+ in parallel pressures the
+// 16-GB Mac. Bump to 2 in a later phase once we have a lighter browser worker.
 const TARGET_PROPOSALS = 1;
 const SNAPSHOT_EVERY = 50;
 const SNAPSHOT_KEY_PREFIX = "ntk/";
@@ -114,12 +124,35 @@ export class TournamentNtk extends DurableObject<Env> {
   private joined = new Set<string>();
   private accepted = 0;
   private considered = 0;
-  private history: { round: number; accepted: boolean; delta: number; ts: number }[] = [];
+  private history: { round: number; accepted: boolean; delta: number; loss?: number | null; ts: number }[] = [];
   private appliedHistory: SpsaAppliedFlip[] = [];
   private snapshotRound = 0;
   private snapshotShards: string[] = [];
   private subscribers = new Set<WebSocket>();
   private bornAt = Date.now();
+  // Phase 40 next-3 — trusted-auditor loss oracle. Workers send
+  // audit_loss_before in every tick (it's the loss they were going to
+  // compute anyway for their claimed_Δ). Server uses it to drive Phase
+  // 39 sym-AIMD η + byzantine real_Δ check on a one-round lag.
+  private lastLoss: number | null = null;
+  private savedLossBeforeApply: number | null = null;
+  private pendingAudit: {
+    round: number;
+    workerId: string;
+    claimedDelta: number;
+  } | null = null;
+  // Adaptive η (Phase 39 sym-AIMD), now driven by audited loss.
+  private currentEta = ETA_INIT;
+  private etaGrowEvents = 0;
+  private etaShrinkEvents = 0;
+  // Per-worker fraud tracking (Phase 9 / 14 / 31 tiered windows).
+  private workerStats = new Map<string, {
+    wins: number;
+    frauds: number;
+    lastWinRound: number;
+    recent: number[];
+    recent_long: number[];
+  }>();
 
   constructor(state: DurableObjectState, env: Env) {
     super(state, env);
@@ -208,7 +241,10 @@ export class TournamentNtk extends DurableObject<Env> {
         model_id_hash: `0x${this.artifact.modelIdHash.toString(16).padStart(16, "0")}`,
         artifact_url: "/data/qwen05b-math-gates-k5000.bin",
         epsilon: EPSILON,
-        eta: ETA,
+        eta: this.currentEta,
+        eta_init: ETA_INIT,
+        eta_grow_events: this.etaGrowEvents,
+        eta_shrink_events: this.etaShrinkEvents,
         num_shards: numShards,
         shard_size_floats: FLOATS_PER_SHARD,
         shards,
@@ -271,7 +307,10 @@ export class TournamentNtk extends DurableObject<Env> {
         round: this.round,
         recent: this.appliedHistory.slice(-50),
         epsilon: EPSILON,
-        eta: ETA,
+        eta: this.currentEta,
+        eta_init: ETA_INIT,
+        eta_grow_events: this.etaGrowEvents,
+        eta_shrink_events: this.etaShrinkEvents,
       }));
       server.addEventListener("close", () => { this.subscribers.delete(server); });
       server.addEventListener("error", () => { this.subscribers.delete(server); });
@@ -300,13 +339,20 @@ export class TournamentNtk extends DurableObject<Env> {
     this.appliedHistory = [];
     this.snapshotRound = 0;
     this.snapshotShards = [];
+    this.lastLoss = null;
+    this.savedLossBeforeApply = null;
+    this.pendingAudit = null;
+    this.currentEta = ETA_INIT;
+    this.etaGrowEvents = 0;
+    this.etaShrinkEvents = 0;
+    this.workerStats.clear();
     this.history.push({ round: -1, accepted: false, delta: 0, ts: Date.now() });
     await this.publishSnapshot();
   }
 
   private applySpsaStep(seed: number, scalar_g: number): void {
     reconstructPerturbation(seed, this.uScratch);
-    const k = ETA * scalar_g;
+    const k = this.currentEta * scalar_g;
     for (let i = 0; i < this.P; i++) this.theta[i] -= k * this.uScratch[i];
   }
 
@@ -318,30 +364,82 @@ export class TournamentNtk extends DurableObject<Env> {
       scalar_g?: number;
       delta?: number;
       since_round?: number;
+      // Phase 40 next-3: worker's local test loss BEFORE running this round's
+      // trials. We trust it as the server's canonical lastLoss; it drives
+      // byzantine real_Δ + sym-AIMD η adaptation on a one-round lag.
+      audit_loss_before?: number;
     }>();
     if (!body.worker_id) return new Response("missing worker_id", { status: 400 });
     this.joined.add(body.worker_id);
 
-    let accepted = false, rejected = false;
+    // ── PHASE 40 next-3: audit ingestion ────────────────────────────────────
+    // If the worker reports a loss measurement, use it. If a previous round's
+    // winner is awaiting audit, compute real_Δ NOW and run the byzantine check
+    // + sym-AIMD η update on it.
+    if (typeof body.audit_loss_before === "number") {
+      const newLoss = body.audit_loss_before;
+      if (this.pendingAudit && this.savedLossBeforeApply !== null) {
+        const realGlobalDelta = newLoss - this.savedLossBeforeApply;
+        const { workerId, claimedDelta } = this.pendingAudit;
+        // Phase 9 / 14 / 31 byzantine math, unchanged from Phase 39.
+        const stats = this.workerStats.get(workerId) ?? { wins: 0, frauds: 0, lastWinRound: -1, recent: [], recent_long: [] };
+        stats.wins += 1;
+        stats.lastWinRound = this.pendingAudit.round;
+        const isFraud = realGlobalDelta > 1e-4 && claimedDelta < -1e-4;
+        if (isFraud) stats.frauds += 1;
+        stats.recent.push(isFraud ? 1 : 0);
+        if (stats.recent.length > 20) stats.recent.shift();
+        stats.recent_long.push(isFraud ? 1 : 0);
+        if (stats.recent_long.length > 100) stats.recent_long.shift();
+        this.workerStats.set(workerId, stats);
+        // Phase 39 sym-AIMD η update — log-symmetric so η drifts on
+        // imbalance of grow vs shrink events.
+        if (realGlobalDelta < -ETA_DELTA_THRESH) {
+          this.currentEta = Math.min(this.currentEta * ETA_UP, ETA_MAX);
+          this.etaGrowEvents += 1;
+        } else if (realGlobalDelta > ETA_DELTA_THRESH) {
+          this.currentEta = Math.max(this.currentEta * ETA_DOWN, ETA_MIN);
+          this.etaShrinkEvents += 1;
+        }
+        // The audit closed the loop for the prior winner; clear pending.
+        this.pendingAudit = null;
+        this.savedLossBeforeApply = null;
+      }
+      this.lastLoss = newLoss;
+    }
+
+    let accepted = false, rejected = false, quarantined = false;
     const hasProposal =
       typeof body.seed === "number" &&
       typeof body.scalar_g === "number" &&
       typeof body.delta === "number";
     if (hasProposal) {
       if (body.round === this.round) {
-        // No byzantine quarantine in next-2 (no server-side loss to compare
-        // against). Workers are trusted for now; reactivated in next-3.
-        this.considered += 1;
-        if (!this.bestProposal || body.delta! < this.bestProposal.delta) {
-          this.bestProposal = {
-            worker_id: body.worker_id,
-            seed: body.seed!,
-            scalar_g: body.scalar_g!,
-            delta: body.delta!,
-          };
+        // Phase 14+31 tiered quarantine, using stats accumulated above.
+        const stats = this.workerStats.get(body.worker_id);
+        const cumRate = stats && stats.wins >= 10 ? stats.frauds / stats.wins : 0;
+        const recent = stats?.recent ?? [];
+        const recentLong = stats?.recent_long ?? [];
+        const winRate = recent.length >= 10
+          ? recent.reduce((a, b) => a + b, 0) / recent.length : 0;
+        const longRate = recentLong.length >= 30
+          ? recentLong.reduce((a, b) => a + b, 0) / recentLong.length : 0;
+        const quarantineHit = cumRate > 0.4 || winRate > 0.4 || longRate > 0.25;
+        if (quarantineHit) {
+          quarantined = true;
+        } else {
+          this.considered += 1;
+          if (!this.bestProposal || body.delta! < this.bestProposal.delta) {
+            this.bestProposal = {
+              worker_id: body.worker_id,
+              seed: body.seed!,
+              scalar_g: body.scalar_g!,
+              delta: body.delta!,
+            };
+          }
+          this.proposalsReceived += 1;
+          accepted = true;
         }
-        this.proposalsReceived += 1;
-        accepted = true;
       } else {
         rejected = true;
       }
@@ -366,12 +464,19 @@ export class TournamentNtk extends DurableObject<Env> {
         if (this.accepted > 0 && this.accepted % SNAPSHOT_EVERY === 0) {
           this.ctx.waitUntil(this.publishSnapshot());
         }
+        // Remember the loss BEFORE this apply so we can compute real_Δ once
+        // the NEXT round's first audit arrives.
+        this.savedLossBeforeApply = this.lastLoss;
+        this.pendingAudit = {
+          round: this.round,
+          workerId: this.bestProposal!.worker_id,
+          claimedDelta: this.bestProposal!.delta,
+        };
       }
-      // No server-side test-loss recompute in next-2 (model too big for the
-      // Worker). The "did this help?" decision was already made by the
-      // tournament selecting the most-negative claimed_Δ. Workers are
-      // trusted for now.
-      this.history.push({ round: this.round, accepted: !!apply, delta: appliedDelta, ts: Date.now() });
+      this.history.push({
+        round: this.round, accepted: !!apply, delta: appliedDelta,
+        loss: this.lastLoss, ts: Date.now(),
+      });
       if (this.history.length > 500) this.history.splice(0, this.history.length - 500);
       this.round += 1;
       this.bestProposal = null;
@@ -381,6 +486,7 @@ export class TournamentNtk extends DurableObject<Env> {
         type: "advance",
         round: this.round,
         applied: appliedFlip,
+        eta: this.currentEta,
       });
     }
 
@@ -398,7 +504,10 @@ export class TournamentNtk extends DurableObject<Env> {
       hidden_size: this.artifact.hiddenSize,
       max_log_gate: this.artifact.maxLogGate,
       epsilon: EPSILON,
-      eta: ETA,
+      eta: this.currentEta,
+      eta_init: ETA_INIT,
+      eta_grow_events: this.etaGrowEvents,
+      eta_shrink_events: this.etaShrinkEvents,
       target: TARGET_PROPOSALS,
       proposals: this.proposalsReceived,
       joined: this.joined.size,
@@ -406,10 +515,11 @@ export class TournamentNtk extends DurableObject<Env> {
       applied_since: appliedSince,
       oldest_applied_round: oldestAppliedRound,
       accept_rate: this.considered > 0 ? this.accepted / this.considered : 0,
-      accepted, rejected,
+      accepted, rejected, quarantined,
       advanced,
       // null in next-2; reactivated in next-3 with a loss oracle.
-      last_loss: null as number | null,
+      last_loss: this.lastLoss,
+      pending_audit_round: this.pendingAudit ? this.pendingAudit.round : null,
     });
   }
 
@@ -434,13 +544,29 @@ export class TournamentNtk extends DurableObject<Env> {
       model_id_hash: `0x${this.artifact.modelIdHash.toString(16).padStart(16, "0")}`,
       artifact_url: "/data/qwen05b-math-gates-k5000.bin",
       epsilon: EPSILON,
-      eta: ETA,
+      eta: this.currentEta,
+      eta_init: ETA_INIT,
+      eta_grow_events: this.etaGrowEvents,
+      eta_shrink_events: this.etaShrinkEvents,
       target: TARGET_PROPOSALS,
       proposals: this.proposalsReceived,
       joined: Array.from(this.joined),
       accepted: this.accepted,
       considered: this.considered,
       accept_rate: this.considered > 0 ? this.accepted / this.considered : 0,
+      last_loss: this.lastLoss,
+      pending_audit_round: this.pendingAudit ? this.pendingAudit.round : null,
+      worker_stats: (() => {
+        const r: Record<string, { wins: number; frauds: number; fraud_rate: number; lastWinRound: number }> = {};
+        for (const [wid, st] of this.workerStats.entries()) {
+          r[wid] = {
+            wins: st.wins, frauds: st.frauds,
+            fraud_rate: st.wins > 0 ? st.frauds / st.wins : 0,
+            lastWinRound: st.lastWinRound,
+          };
+        }
+        return r;
+      })(),
       theta_stats: {
         mean_abs: sumAbs / this.P,
         l2_norm: Math.sqrt(sumSq),

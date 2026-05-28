@@ -46,20 +46,33 @@ _Updated: 2026-05-28 (Phases 39 + 39b shipped; sym-AIMD remains canonical; Phase
 - INTELLECT-3 (Prime Intellect, Nov 2025) went centralized — abandoned the decentralized story. "Anyone-can-join" frontier in mid-2026 = Nous DisTrO + Pluralis + postnet-cf + NTK-Mirror (the latter is single-machine but the gate parameterization is FL-shaped).
 - NTK-Mirror is brand new (May 23, 2026) but going viral fast. Combining it with postnet-cf + neuropulse is a "three-MIT-projects compose into one Cloudflare Worker that trains real LLM behavior across browser tabs" story — genuinely novel positioning.
 
-**The "obvious next move" if you say "go":** Phase 40 next-3 (loss oracle + browser worker). Next-2 just shipped: the federated DO (`src/tournament-ntk.ts`), a Python verifier (`scripts/ntk-verifier.py`) that drives real Qwen-0.5B forward passes with the gate-apply hook injected, and a successful R=30 run (loss 1.7632 → 1.7629, ‖θ‖ 0 → 0.044). See `docs/PHASE_40_NEXT2_NTK_DO.md`.
+**The "obvious next move" if you say "go":** Phase 40 next-4 — browser-runnable worker. Next-3 just shipped the trusted-auditor loss oracle, which reactivates Phase 39's sym-AIMD η + byzantine defense for the NTK federated trainer. Empirical R=30: η drifts 1.0e-3 → 2.53e-3 (grow=19 shr=0), loss descent 1.75× larger than next-2. The protocol stack is COMPLETE on real-LLM training — just Python-only on the worker side.
 
-**What next-3 needs to bring back (deferred from next-2):**
-- **server-side test loss** — CF Worker can't load Qwen-0.5B. Three viable architectures: (a) "trusted auditor" companion service that posts test_loss to the DO per round; (b) shrink to a Worker-bundled tiny base model (Pythia-160M / DistilGPT-2) via Transformers.js — Phase 39's full sym-AIMD reactivates; (c) cross-worker verification — server asks ANOTHER worker to evaluate the post-apply theta; fraud = disagreement. (c) is novel; (a) is fastest.
-- **post-apply byzantine check** — needs server-side real_Δ.
-- **adaptive η (Phase 39 sym-AIMD)** — needs server-side real_Δ.
-- **TARGET_PROPOSALS = 2** (currently 1 in `src/tournament-ntk.ts` for solo dev; bump back to 2 once we have multiple cheap workers).
-- **a browser worker** — Python is the only Qwen runner we have today; next-3 should write a JS/WGSL worker that fits in a tab.
+**Phase 40 next-4 scope:**
+- Browser worker that runs Qwen-0.5B (or a smaller proxy like Pythia-160M / DistilGPT-2) forward + injects the gate-apply hook + submits proposals. Two viable engines:
+  - **Transformers.js (Xenova/Qwen-0.5B in ONNX-int4):** easiest port, runs in the browser, but probably needs to fall back to a smaller model for memory; ~3-5 min per 100 rounds.
+  - **neuropulse's WGSL engine** (already runs Phi-3-mini in a browser): faster but needs the gate-apply hook ported to WGSL and a clean way to expose the per-layer output hook point.
+- Decide on the demo target: keep Qwen-0.5B (matches the gate artifact we baked) or rebake gates for a smaller base model (Pythia-160M ~640 MB; fits a tab better).
+- public/ntk.html + public/ntk-worker.js for the demo page.
+- Bump TARGET_PROPOSALS back to 2 in src/tournament-ntk.ts once browser workers are cheap enough to run several at once.
+
+**Phase 40 next-3 deliverables (DONE):**
+- `src/tournament-ntk.ts` — +124 LOC: lastLoss / pendingAudit / sym-AIMD / workerStats / quarantine
+- `scripts/ntk-verifier.py` — +30 LOC: audit posting, server-η sync, per-round η/grow/shr logging
+- `docs/PHASE_40_NEXT3_LOSS_ORACLE.md` — empirical writeup of the η-drift result
+- Wire format gained one optional float: `audit_loss_before`
 
 **Phase 40 next-2 deliverables (DONE):**
 - `src/tournament-ntk.ts` — federated DO (K=5000 gates as trainable surface)
 - `src/worker.ts` + `wrangler.jsonc` — binding + migration v10
 - `scripts/ntk-verifier.py` — Python verifier using `ntkmirror`'s `_SignedLogMaskModule` to inject gates into Qwen-0.5B forward
 - `docs/PHASE_40_NEXT2_NTK_DO.md` — empirical writeup of the R=30 run
+
+**Still deferred (multi-phase backlog):**
+- TARGET_PROPOSALS = 2 (currently 1 in `src/tournament-ntk.ts` for solo dev)
+- An actual byzantine attacker test (logic is wired but no `--attack` flag yet)
+- Longer empirical run (R = 200+) for paper-grade trajectory
+- Persistent DO state (`state.storage`) across all 12 tournament DOs
 
 **Phase 40 next-1 deliverables (DONE):**
 - `scripts/extract-ntk-gates.py` — emits binary artifact (32 B header + K × 8 B body)

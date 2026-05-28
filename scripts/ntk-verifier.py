@@ -262,25 +262,33 @@ def main() -> int:
 
     # ── 5. main loop ─────────────────────────────────────────────────────────
     history = []      # (round, loss_before)
+    # Track server's current η; it adapts via Phase 39 sym-AIMD once audited
+    # loss starts arriving (next round's first audit closes the loop on this
+    # round's winner). Start from CLI value; pull from /tick responses.
+    current_eta = float(args.eta)
     t_start = time.time()
     for it in range(args.rounds):
         # poll for current round (handles other workers' applied flips)
         pulled = http_post_json(f"{args.coord}/api/ntk/tick",
                                 {"worker_id": worker_id, "since_round": round_num})
+        if isinstance(pulled.get("eta"), (int, float)):
+            current_eta = float(pulled["eta"])
         # reconcile applied_since
         if pulled.get("applied_since"):
             for flip in pulled["applied_since"]:
                 if flip["round"] < round_num:
                     continue
                 u_flip = reconstruct_perturbation(int(flip["seed"]), K)
-                theta -= args.eta * float(flip["scalar_g"]) * u_flip
+                theta -= current_eta * float(flip["scalar_g"]) * u_flip
         round_num = int(pulled["round"])
 
-        # local loss at current θ (this is "loss_before" for THIS round's claimed_Δ)
+        # local loss at current θ — this is "loss_before" for THIS round's
+        # claimed_Δ, AND the trusted-auditor signal the server uses to
+        # compute real_Δ for the previous round's winner.
         loss_before = loss_with_raw(theta)
         history.append((round_num, loss_before))
 
-        # K SPSA trials
+        # K SPSA trials, all using server's CURRENT η for the trial step.
         best = None
         for t in range(args.trials):
             seed = (np.random.randint(0, 2**32 - 1)) & 0xFFFFFFFF
@@ -290,13 +298,14 @@ def main() -> int:
             loss_plus = loss_with_raw(theta_plus)
             loss_minus = loss_with_raw(theta_minus)
             g = (loss_plus - loss_minus) / (2.0 * args.epsilon)
-            theta_step = theta - args.eta * g * u
+            theta_step = theta - current_eta * g * u
             loss_at = loss_with_raw(theta_step)
             delta = loss_at - loss_before
             if best is None or delta < best["delta"]:
                 best = {"seed": int(seed), "scalar_g": float(g), "delta": float(delta)}
 
-        # submit
+        # submit — include audit_loss_before so the server can close the
+        # byzantine + sym-AIMD loop on the PRIOR round's winner.
         reported = http_post_json(f"{args.coord}/api/ntk/tick", {
             "worker_id": worker_id,
             "round": round_num,
@@ -304,24 +313,33 @@ def main() -> int:
             "scalar_g": best["scalar_g"],
             "delta": best["delta"],
             "since_round": round_num,
+            "audit_loss_before": float(loss_before),
         })
+        if isinstance(reported.get("eta"), (int, float)):
+            current_eta = float(reported["eta"])
 
-        # if server advanced (it had ≥ TARGET=2 proposals this round), apply the
-        # accepted flip locally so we match the server.
+        # if server advanced, apply the accepted flip locally so we match
+        # the server.
         if reported.get("advanced") and reported.get("last_applied"):
             f = reported["last_applied"]
             if f["round"] == round_num:    # the round that just advanced
                 u_flip = reconstruct_perturbation(int(f["seed"]), K)
-                theta -= args.eta * float(f["scalar_g"]) * u_flip
+                # NOTE: the server applied with THIS round's η; we replay with
+                # the same value (already updated above from reported.eta).
+                theta -= current_eta * float(f["scalar_g"]) * u_flip
                 round_num = int(reported["round"])
         else:
             round_num = int(reported["round"])
 
         if (it + 1) % 5 == 0 or it == 0:
             elapsed = time.time() - t_start
-            print(f"  it={it+1:4d}  server_r={round_num:4d}  loss_before={loss_before:.4f}  "
-                  f"best_Δ={best['delta']:+.4f}  ||θ||={float(np.linalg.norm(theta)):.4f}  "
-                  f"  ({elapsed:.1f}s)")
+            grow = reported.get("eta_grow_events", "?")
+            shr = reported.get("eta_shrink_events", "?")
+            quar = " QUAR" if reported.get("quarantined") else ""
+            print(f"  it={it+1:4d}  server_r={round_num:4d}  "
+                  f"loss_before={loss_before:.4f}  best_Δ={best['delta']:+.4f}  "
+                  f"η={current_eta:.2e}  grow={grow} shr={shr}  "
+                  f"||θ||={float(np.linalg.norm(theta)):.4f}{quar}  ({elapsed:.1f}s)")
 
     # ── 6. final eval ────────────────────────────────────────────────────────
     final_loss = loss_with_raw(theta)
