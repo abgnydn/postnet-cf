@@ -46,14 +46,26 @@ _Updated: 2026-05-28 (Phases 39 + 39b shipped; sym-AIMD remains canonical; Phase
 - INTELLECT-3 (Prime Intellect, Nov 2025) went centralized — abandoned the decentralized story. "Anyone-can-join" frontier in mid-2026 = Nous DisTrO + Pluralis + postnet-cf + NTK-Mirror (the latter is single-machine but the gate parameterization is FL-shaped).
 - NTK-Mirror is brand new (May 23, 2026) but going viral fast. Combining it with postnet-cf + neuropulse is a "three-MIT-projects compose into one Cloudflare Worker that trains real LLM behavior across browser tabs" story — genuinely novel positioning.
 
-**The "obvious next move" if you say "go":** Phase 40 next-1 step (per `docs/PHASE_40_NTKMIRROR_PLAN.md`). Phase 40 scoping is DONE — ntkmirror is installed at `~/ntkmirror/.venv`, the demo runs, the controller `.pt` artifact has been dissected. Wire-format math confirmed: K=5 000 gates = 40 KB static controller, per-round wire still 20 bytes. The next session should: (a) write the Python gate-selection script that emits a binary artifact, (b) port the gate-apply hook to TS, (c) bake K=5 000 gates for one (base_model, task) pair as a static asset under `public/data/`. ~3 hours. See PHASE_40_NTKMIRROR_PLAN.md for the full 4-session sequence.
+**The "obvious next move" if you say "go":** Phase 40 next-2 (per `docs/PHASE_40_NTKMIRROR_PLAN.md`). Phase 40 next-1 just shipped: gate-extraction Python script (`scripts/extract-ntk-gates.py`), TS gate-apply hook (`src/ntk-gate.ts`), first baked artifact (`public/data/qwen05b-math-gates-k5000.bin`, 40 KB), and a 16-check parity test (`scripts/test-ntk-gate-parse.mjs`) all passing.
 
-**Phase 40 scoping notes (so the next session doesn't redo them):**
-- ntkmirror cloned at `~/ntkmirror`, installed editable in `~/ntkmirror/.venv` (Python 3.14, torch 2.12, transformers 5.9).
-- Required Mac flag: `--dtype fp32`. Defaults NaN at step 8 on MPS.
-- Qwen2.5-0.5B-Instruct: 24 decoder layers × 896 hidden = 21 504 candidate gates per (model, layer, channel). Default K=5 000 selects ~23 %.
-- Trained controller (K=512): 91.8 % of gates non-zero, gates use only ~20 % of the 0.05 budget (room for stronger updates).
-- Tractable browser-side compute per Phase 40 design table: 5-20 min per 100 rounds via Transformers.js, 2-8 min via neuropulse WGSL.
+**What next-2 looks like (~3 hours):**
+1. Write `src/tournament-ntk.ts` — fork `tournament-head-spsa-adaptive.ts` (Phase 39's sym-AIMD SPSA DO). Replace head-model imports with `ntk-gate.ts`. Constructor: fetch the gate artifact from ASSETS, parse via `parseGateArtifact`, build per-layer index. State: `theta = raw[K]` (the trainable gate values). The protocol layer stays IDENTICAL to Phase 39.
+2. Wire into `src/worker.ts` + `wrangler.jsonc` (new binding `TOURNAMENT_NTK`, migration v10).
+3. Write `scripts/ntk-verifier.mjs` — Node-side verifier. Uses Transformers.js to run Qwen-0.5B forward (with `applyGatesToStack` injecting our gates) for trial loss eval. 3 forwards per SPSA trial. ~150-600 ms per trial on M-series.
+4. First end-to-end run: R=50 against `wrangler dev`. Acceptance: federated training of the gate controller descends test loss on the math eval split.
+
+**Phase 40 next-1 deliverables (DONE):**
+- `scripts/extract-ntk-gates.py` — emits binary artifact (32 B header + K × 8 B body)
+- `src/ntk-gate.ts` — `parseGateArtifact`, `buildGateIndex`, `applyGatesToLayer` / `applyGatesToStack`, `fnv1a64`
+- `public/data/qwen05b-math-gates-k5000.bin` — 40 032 B (5000 gates × Qwen-0.5B)
+- `scripts/test-ntk-gate-parse.mjs` — 16 checks, all pass; Python ↔ TS round-trip byte-verified
+
+**Phase 40 scoping notes (carried from prior session):**
+- ntkmirror cloned at `~/ntkmirror`, venv at `~/ntkmirror/.venv` (Python 3.14, torch 2.12, transformers 5.9).
+- Mac flag REQUIRED: `--dtype fp32`. Defaults NaN at step 8 on MPS.
+- Qwen2.5-0.5B-Instruct: 24 layers × 896 hidden = 21 504 candidate gates; we picked 5 000 (~23 %).
+- Per-layer histogram (locked in): heavy on early layers (264-331/each), light in middle (68-110), spike on final layer (248) — classic NTK U-shape.
+- Tractable browser compute per the design table: 5-20 min per 100 rounds via Transformers.js, 2-8 min via neuropulse WGSL.
 
 **Quick orientation pointers:**
 
