@@ -89,10 +89,10 @@
     <button id="join">Join NTK swarm</button>
     <button id="reset" class="secondary">Reset coordinator</button>
     <label style="margin-left:14px;font-size:13px;color:#a02828;">
-      <input type="checkbox" id="attack" disabled />
-      attack mode (not wired in this phase — byzantine defense is live
-      server-side but no in-browser attacker; see Python verifier
-      <code>BYZANTINE=1</code> flag)
+      <input type="checkbox" id="attack" />
+      attack mode (this tab fabricates seeds + lies about Δ → server's
+      Phase 39 byzantine defense should quarantine this worker within
+      ~10 wins; no forward passes, so attack ticks are basically free)
     </label>
     <div id="progress">(idle)</div>
     <div class="stats">

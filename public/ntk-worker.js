@@ -191,19 +191,31 @@ async function _loadOneToOpfs(url, opfsName, progressFn, label) {
   const resp = await fetch(url);
   if (!resp.ok) throw new Error(`${label} fetch ${resp.status}`);
   const total = Number(resp.headers.get("content-length")) || 0;
-  const chunks = [];
-  const reader = resp.body.getReader();
-  let received = 0;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value);
-    received += value.length;
-    if (total) progressFn(`${label}: ${(received / 1024 / 1024).toFixed(0)} / ${(total / 1024 / 1024).toFixed(0)} MB (${(100 * received / total).toFixed(0)}%)`);
-    else       progressFn(`${label}: ${(received / 1024 / 1024).toFixed(0)} MB`);
+  let buf;
+  // Prefer Response.bytes() (Chrome 116+, Firefox 130+) — returns a single
+  // Uint8Array directly without going through chunks→Blob→arrayBuffer,
+  // which halves peak memory during the download of a 1 GB+ ONNX.
+  if (typeof resp.bytes === "function") {
+    const bytes = await resp.bytes();
+    buf = bytes.buffer;
+    progressFn(`${label}: ${(bytes.length / 1024 / 1024).toFixed(0)} MB (single-allocation)`);
+  } else {
+    // Fallback: streamed chunks → Blob → ArrayBuffer (older browsers; uses
+    // ~2× peak memory during the final blob.arrayBuffer() call).
+    const chunks = [];
+    const reader = resp.body.getReader();
+    let received = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      received += value.length;
+      if (total) progressFn(`${label}: ${(received / 1024 / 1024).toFixed(0)} / ${(total / 1024 / 1024).toFixed(0)} MB (${(100 * received / total).toFixed(0)}%)`);
+      else       progressFn(`${label}: ${(received / 1024 / 1024).toFixed(0)} MB`);
+    }
+    const blob = new Blob(chunks);
+    buf = await blob.arrayBuffer();
   }
-  const blob = new Blob(chunks);
-  const buf = await blob.arrayBuffer();
   if (buf.byteLength > OPFS_MAX_BYTES) {
     progressFn(`${label} too large for OPFS (${(buf.byteLength / 1024 / 1024).toFixed(0)} MB > ${(OPFS_MAX_BYTES / 1024 / 1024).toFixed(0)} MB); keeping in memory only`);
     return buf;
@@ -227,17 +239,43 @@ async function loadOnnxToOpfs(progressFn) {
 }
 
 let ortSession = null;
-async function initOrtSession(onnxBufs, progressFn) {
-  progressFn("initializing ORT session...");
-  const opts = {
-    executionProviders: ["wasm"],
-    graphOptimizationLevel: "all",
-  };
-  if (onnxBufs.data) {
-    opts.externalData = [{ data: new Uint8Array(onnxBufs.data), path: "weights.bin" }];
+
+// Backend selection. WebGPU is 3-5× faster on supported hardware; WASM
+// is the universal fallback. Override with ?backend=wasm or ?backend=webgpu.
+function pickBackends() {
+  const qs = (typeof location !== "undefined")
+    ? new URLSearchParams(location.search).get("backend") : null;
+  if (qs === "wasm") return [["wasm", "WASM (forced)"]];
+  if (qs === "webgpu") return [["webgpu", "WebGPU (forced)"]];
+  // Default order: try WebGPU, fall back to WASM.
+  if (typeof navigator !== "undefined" && navigator.gpu) {
+    return [["webgpu", "WebGPU"], ["wasm", "WASM (fallback)"]];
   }
-  ortSession = await ort.InferenceSession.create(new Uint8Array(onnxBufs.graph), opts);
-  progressFn(`ORT ready. inputs=${ortSession.inputNames.join(", ")}, outputs=${ortSession.outputNames.join(", ")}`);
+  return [["wasm", "WASM"]];
+}
+
+async function initOrtSession(onnxBufs, progressFn) {
+  const candidates = pickBackends();
+  let lastErr = null;
+  for (const [ep, label] of candidates) {
+    progressFn(`initializing ORT session (${label})...`);
+    const opts = {
+      executionProviders: [ep],
+      graphOptimizationLevel: "all",
+    };
+    if (onnxBufs.data) {
+      opts.externalData = [{ data: new Uint8Array(onnxBufs.data), path: "weights.bin" }];
+    }
+    try {
+      ortSession = await ort.InferenceSession.create(new Uint8Array(onnxBufs.graph), opts);
+      progressFn(`ORT ready (${label}). inputs=${ortSession.inputNames.join(", ")}, outputs=${ortSession.outputNames.join(", ")}`);
+      return;
+    } catch (e) {
+      lastErr = e;
+      progressFn(`${label} failed: ${(e?.message || e).toString().slice(0, 100)}`);
+    }
+  }
+  throw lastErr || new Error("no ORT backend available");
 }
 
 // ─── forward + cross-entropy loss given current raw[K] ──
@@ -493,8 +531,52 @@ async function spsaTrial(rng, lossBefore) {
   return { seed, scalar_g, delta: lossAt - lossBefore };
 }
 
+// Attack mode: enabled via ?attack=1 URL param OR the #attack checkbox.
+// When on, this worker fabricates random seeds with claimed_Δ = -10 and
+// skips the entire ONNX/ORT path (saves ~2 GB RAM per attacker tab).
+// Server's Phase 39 byzantine check catches the pattern within ~10 wins.
+function readAttackFlag() {
+  if (typeof location !== "undefined") {
+    if (new URLSearchParams(location.search).get("attack") === "1") return true;
+  }
+  const el = typeof document !== "undefined" ? document.getElementById("attack") : null;
+  return !!(el && el.checked);
+}
+
 async function runForever() {
-  // Heavy init: artifact, ONNX, ORT session, server snapshot.
+  if (readAttackFlag()) {
+    // Attack mode short-circuit: no ONNX load, no ORT, no gate artifact,
+    // no snapshot. Saves ~2 GB of RAM per attacker tab so the honest
+    // workers can breathe. Attacker just needs to know the current
+    // round number to submit valid proposals.
+    log("attack mode: skipping ONNX + artifact load (~2 GB saved)");
+    setProgress("attack mode (no model load)");
+    const pulled = await tickPoll();
+    if (typeof pulled.round === "number") localRound = pulled.round;
+    if (typeof pulled.eta === "number") { ETA = pulled.eta; currentEta = pulled.eta; }
+    openWebSocket();
+    while (running) {
+      try {
+        const seedBase = ((localRound + 1) * 1000003) ^ (workerId.charCodeAt(0) * 31 + workerId.charCodeAt(2));
+        const rng = mulberry32(seedBase);
+        const fakeSeed = (rng() * 0xFFFFFFFF) >>> 0;
+        const reported = await submitBest(localRound, fakeSeed, 1.0, -10, 0);
+        if (typeof reported.eta === "number") { ETA = reported.eta; currentEta = reported.eta; }
+        if (reported.quarantined) {
+          log(`⚠ QUARANTINED — server detected fraud (this was the point)`);
+        } else if (reported.advanced) {
+          log(`[attacker] R${localRound} → R${reported.round}`);
+        }
+        if (typeof reported.round === "number") localRound = reported.round;
+      } catch (e) {
+        log(`[attacker] err: ${e.message}`);
+      }
+      await new Promise(r => setTimeout(r, POLL_DELAY_MS));
+    }
+    return;
+  }
+
+  // Heavy init (honest workers only): artifact, ONNX, ORT session, snapshot.
   artifact = await loadGateArtifact();
   log(`gate artifact loaded (${(artifact.bytes / 1024).toFixed(1)} KB)`);
   const onnxBufs = await loadOnnxToOpfs(setProgress);
@@ -519,11 +601,24 @@ async function runForever() {
       }
       const seedBase = ((localRound + 1) * 1000003) ^ (workerId.charCodeAt(0) * 31 + workerId.charCodeAt(2));
       const rng = mulberry32(seedBase);
-      const lossBefore = await forwardLoss(localTheta, artifact);
-      let best = null;
-      for (let t = 0; t < TRIALS_PER_REPORT; t++) {
-        const trial = await spsaTrial(rng, lossBefore);
-        if (!best || trial.delta < best.delta) best = trial;
+      let lossBefore;
+      let best;
+      if (readAttackFlag()) {
+        // Byzantine: skip the forward, fabricate (seed, scalar_g, delta).
+        // claimed_Δ = -10 is way below the no-op threshold, so server's
+        // tournament will pick this. After apply, real_Δ ≈ 0 (random
+        // perturbation) so the per-round fraud bit fires; ~10 wins to
+        // quarantine.
+        const fakeSeed = (rng() * 0xFFFFFFFF) >>> 0;
+        lossBefore = 0;                    // not used by server's audit math
+        best = { seed: fakeSeed, scalar_g: 1.0, delta: -10 };
+      } else {
+        lossBefore = await forwardLoss(localTheta, artifact);
+        best = null;
+        for (let t = 0; t < TRIALS_PER_REPORT; t++) {
+          const trial = await spsaTrial(rng, lossBefore);
+          if (!best || trial.delta < best.delta) best = trial;
+        }
       }
       const reported = await submitBest(localRound, best.seed, best.scalar_g, best.delta, lossBefore);
       updateStats(reported);

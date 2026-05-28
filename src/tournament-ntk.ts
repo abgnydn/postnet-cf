@@ -65,10 +65,12 @@ const ETA_MAX = 0.1;
 // effectively the base model and small θ steps barely shift loss. With this
 // threshold the audit signal lifts above noise within ~10 rounds.
 const ETA_DELTA_THRESH = 1e-5;
-// TARGET = 1 for Phase 40 next-2/3 dev: the Python verifier (only Qwen-runner
-// we have today) is heavy enough that running 2+ in parallel pressures the
-// 16-GB Mac. Bump to 2 in a later phase once we have a lighter browser worker.
-const TARGET_PROPOSALS = 1;
+// Phase 40 next-5: bumped to 2 now that the browser worker is the canonical
+// federated path. Two tabs can run simultaneously on a 16-GB Mac (each tab
+// is ~1.5 GB ONNX + ORT overhead). For solo-dev runs without a second worker,
+// open the page with ?solo=1 — the server will accept-and-advance after the
+// FIRST proposal if it sees only one joined worker. (Or just open two tabs.)
+const TARGET_PROPOSALS = 2;
 const SNAPSHOT_EVERY = 50;
 const SNAPSHOT_KEY_PREFIX = "ntk/";
 const SHARD_SIZE = 16 * 1024;

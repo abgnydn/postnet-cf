@@ -598,6 +598,87 @@ deliverable.
 - Longer empirical run (R=200+) for paper-grade numbers
 - In-browser attacker scaffold for live byzantine demo
 
+## Session 5b — quick-win polish + a protocol-architecture finding
+
+This session added three small wins and surfaced one structural
+limit of the Phase 40-3 trusted-auditor scheme.
+
+### Quick wins shipped
+
+1. **WebGPU EP attempt with WASM fallback.** `?backend=wasm` or
+   `?backend=webgpu` query param forces. Default: try WebGPU when
+   `navigator.gpu` is present, fall back to WASM on failure.
+2. **Attack mode in the browser.** Checkbox `#attack` is now live
+   (was disabled). The attacker tab **skips the entire ONNX/ORT/
+   gate-artifact/snapshot load path** — saves ~2 GB of RAM per
+   attacker tab. Useful for live-demoing byzantine defense without
+   running two full Qwen instances.
+3. **`Response.bytes()` for the model fetch** (Chrome 116+,
+   Firefox 130+). Returns the 1 GB ONNX as a single Uint8Array
+   allocation instead of going through chunks→Blob→arrayBuffer,
+   which halves peak memory during honest-tab download.
+4. **TARGET_PROPOSALS = 2** in `src/tournament-ntk.ts` for
+   multi-tab federation. Open two tabs to advance rounds.
+
+### The protocol-architecture finding (live-tested)
+
+Ran honest + attacker tabs simultaneously. After 2 min:
+
+```
+   round=65, accepted=65, considered=131
+   attacker wins: 65 / 65   (every win)
+   frauds flagged:     1 / 65 (~1.5%)
+   quarantine threshold: 40% cumulative
+   quarantine result:  NOT triggered
+```
+
+Why? **Phase 40-3's trusted-auditor scheme has a hole that
+Phase 39's server-computed loss didn't.** In Phase 39 the server
+recomputed `lastLoss` after each apply, so `real_Δ` was an honest
+ground-truth. In Phase 40-3 we moved the loss compute to the
+*worker* (because CF Workers can't load Qwen-0.5B) and trust the
+worker's `audit_loss_before` field. Three failure modes follow:
+
+1. **Attacker self-audits.** The attacker also sends its own
+   `audit_loss_before` (=0 in our impl). When the attacker's
+   tick arrives FIRST in a round, server's `lastLoss` gets
+   overwritten with the lie. Subsequent `realDelta` calculations
+   use a corrupted baseline.
+
+2. **Audit rate << attack rate.** Honest tab takes ~30 s per
+   forward (12 forwards per round = ~6 min per round). Attacker
+   takes ~200 ms per round (no forward). Honest contributes one
+   audit per ~30 s; attacker submits ~150 proposals in the same
+   window. Fraud-rate denominator (cumulative wins) climbs much
+   faster than the numerator (flagged frauds).
+
+3. **`pendingAudit` is single-slot.** Only the last apply has its
+   `realDelta` computed when the next audit arrives — earlier
+   applies in the same gap are silently skipped by the byzantine
+   check.
+
+### Fixes for a future phase
+
+- **Cross-audit:** server picks a 3rd worker (round-robin) to
+  verify each apply by independent forward. Worker reputation
+  tracks both wins AND audit-disagreement.
+- **Rate-limit audits per worker_id.** Honest workers (slow,
+  rare) get higher audit-trust weight than fast workers (which
+  could be attackers).
+- **Cryptographic commitment to the data shard** (VerifBFL,
+  arXiv:2501.04319). Worker proves to the server that
+  `scalar_g` was computed on a specific data sample committed
+  to in advance. Replaces "trust the audit" with "verify the
+  proof". The splashy answer; ~1 week of work.
+- **Multi-slot `pendingAudit` queue.** Cheap fix; would at
+  least make per-apply detection work.
+
+These don't change today's commit — just documenting the limit
+clearly. The browser demo still demonstrates federated SPSA
+training of a real LLM's gate controller; the byzantine defense
+is **partial** under the current architecture and the writeup
+should say so.
+
 ## Reproducing session 5
 
 ```bash

@@ -46,12 +46,17 @@ _Updated: 2026-05-28 (Phases 39 + 39b shipped; sym-AIMD remains canonical; Phase
 - INTELLECT-3 (Prime Intellect, Nov 2025) went centralized — abandoned the decentralized story. "Anyone-can-join" frontier in mid-2026 = Nous DisTrO + Pluralis + postnet-cf + NTK-Mirror (the latter is single-machine but the gate parameterization is FL-shaped).
 - NTK-Mirror is brand new (May 23, 2026) but going viral fast. Combining it with postnet-cf + neuropulse is a "three-MIT-projects compose into one Cloudflare Worker that trains real LLM behavior across browser tabs" story — genuinely novel positioning.
 
-**The "obvious next move" if you say "go":** Phase 40 next-5 — polish + scale. The federated-LLM-in-a-browser-tab works end-to-end (`public/ntk.html` + local 994 MB ONNX). Five real moves remaining:
-1. **HF Hub upload of the 994 MB ONNX** so the public URL works without a local http-server. `huggingface-cli upload <user>/postnet-qwen05b-gates qwen05b-with-gates-optimum-int8.onnx`. Then flip `ONNX_URL` default in `public/ntk-worker.js`.
-2. **Bump TARGET_PROPOSALS = 2** in `src/tournament-ntk.ts` once two tabs can be open at once.
-3. **Try WebGPU EP** in `ntk-worker.js` (1-line change; ~3-5× speedup if our int8 ops run on GPU).
-4. **Longer empirical run** (R=200+) and writeup in style of `PHASE_37_SCALING.md` / `PHASE_39_ADAPTIVE_ETA.md`.
-5. **In-browser attacker scaffold** to live-demo Phase 39 byzantine defense on the Qwen pipeline.
+**The "obvious next move" if you say "go":** Phase 40 next-6 — fix the byzantine hole surfaced in 5b's live test. Session 5b shipped quick wins (WebGPU EP fallback, attack mode w/ ONNX skip, `Response.bytes()` single-allocation load, TARGET=2) AND surfaced a real architecture limit: the trusted-auditor scheme from Phase 40-3 lets a fast attacker out-spam a slow honest auditor (1.5% fraud rate vs 40% quarantine threshold over 65 wins in 2 min). Three viable fixes documented in `docs/PHASE_40_NEXT4B_QWEN_ONNX.md` "Session 5b": cross-audit (3rd worker verifies each apply), rate-limit per worker_id, or cryptographic commitment via VerifBFL.
+
+**Phase 40 next-5b deliverables (DONE):**
+- `public/ntk-worker.js` — attack mode now defined + short-circuits ONNX/ORT/snapshot loads; WebGPU EP attempt with WASM fallback (URL param `?backend=wasm|webgpu` overrides); `Response.bytes()` for single-allocation model fetch.
+- `public/ntk.html` — `#attack` checkbox no longer disabled.
+- `src/tournament-ntk.ts` — `TARGET_PROPOSALS = 2`.
+- `docs/PHASE_40_NEXT4B_QWEN_ONNX.md` "Session 5b" — full writeup of the live byzantine test + the architecture limit + the three fixes for a future phase.
+
+**Still queued from the original next-5 plan:**
+- HF Hub upload of the 994 MB int8 ONNX (instructions in PHASE_40_NEXT4B_QWEN_ONNX.md); flip `ONNX_URL` default in worker.
+- Longer empirical run (R=200+) for paper-grade trajectory data.
 
 **Phase 40 next-4-b session 5 deliverables (DONE — end-to-end works):**
 - Pipeline: `optimum-cli` (export) → `scripts/inject-gates-onnx.py` (Mul surgery) → `scripts/quantize-qwen-onnx.py` (int8 single file). Output: 994 MB single-file ONNX, ORT-web compatible.
