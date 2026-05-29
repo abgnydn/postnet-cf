@@ -179,7 +179,14 @@ def main() -> int:
     ap.add_argument("--batch-size", type=int, default=4)
     ap.add_argument("--max-length", type=int, default=256)
     ap.add_argument("--reset", action="store_true", help="reset server state on startup")
+    ap.add_argument("--seed", type=int, default=None,
+                    help="seed numpy + torch for reproducible SPSA seed selection (Phase 40 next-6e multi-seed sweep)")
     args = ap.parse_args()
+
+    if args.seed is not None:
+        np.random.seed(args.seed)
+        torch.manual_seed(args.seed)
+        print(f"seed:      {args.seed}")
 
     worker_id = args.worker_id or f"ntk-py-{int(time.time() * 1000) & 0xFFFF}"
     print(f"worker_id: {worker_id}")
