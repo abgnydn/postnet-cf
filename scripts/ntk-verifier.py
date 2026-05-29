@@ -120,21 +120,31 @@ def reconstruct_perturbation(seed: int, P: int) -> np.ndarray:
 
 
 # ─── HTTP helpers (postnet wire format) ──────────────────────────────────────
+# UA spoofs a real browser. Cloudflare's default bot detection 403s the
+# Python-urllib/* User-Agent, especially when the request originates from
+# a data-center IP (Colab, Vercel, etc.).
+_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+       "AppleWebKit/537.36 (KHTML, like Gecko) "
+       "Chrome/126.0.0.0 Safari/537.36 postnet-ntk-verifier/1.0")
+
 
 def http_get_json(url: str) -> dict:
-    with urllib.request.urlopen(url, timeout=15) as resp:
+    req = urllib.request.Request(url, headers={"User-Agent": _UA})
+    with urllib.request.urlopen(req, timeout=15) as resp:
         return json.loads(resp.read())
 
 
 def http_get_bytes(url: str) -> bytes:
-    with urllib.request.urlopen(url, timeout=30) as resp:
+    req = urllib.request.Request(url, headers={"User-Agent": _UA})
+    with urllib.request.urlopen(req, timeout=30) as resp:
         return resp.read()
 
 
 def http_post_json(url: str, body: dict) -> dict:
     data = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(url, data=data, method="POST",
-                                  headers={"content-type": "application/json"})
+                                  headers={"content-type": "application/json",
+                                           "User-Agent": _UA})
     with urllib.request.urlopen(req, timeout=15) as resp:
         return json.loads(resp.read())
 
