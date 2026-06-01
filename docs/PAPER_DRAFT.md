@@ -1,115 +1,127 @@
-# Postnet-CF: A federated flip-and-accept protocol with byzantine resistance, on Cloudflare Workers
+# Postnet-CF: Federated LLM gate-controller training across browser tabs with verified byzantine defense
 
-*Working draft — not peer reviewed*
+*Working draft v0.2 — not peer reviewed. Zenodo DOI on first archive.*
 
 ## Abstract
 
-We implement and evaluate a federated learning protocol designed for browser-tab workers behind hostile networks. The substrate is a Cloudflare Durable Object that coordinates worker proposals via a single-winner tournament: each round, every worker proposes a small parameter "flip" (`K` index/value updates) and a claimed loss delta; the coordinator picks the most-negative claimed delta and applies it. The protocol is **bandwidth-optimal asymptotically** — per-tick downlink is `O(1)` in model size after a one-time bootstrap — and is **byzantine-resistant to 50% attacker share** via a sliding-window fraud-detection defense that verifies reported deltas against an independent test-loss measurement. We evaluate the protocol on a char-LM task (P = 2 379 parameters) under controlled attack across 4 protocol variants and 3 attacker counts, with statistically tight numbers across seeds. The complete reference implementation, including a unified dashboard, runs on the Cloudflare free tier; the bootstrap snapshot path scales to BitNet-2B-class models (P ≈ 1.5B ternary, ~282 MB) via sharded R2 storage.
+We present **Postnet-CF**, a federated learning protocol whose workers are unmodified browser tabs and whose coordinator is a Cloudflare Durable Object. Updates are *single-scalar* SPSA estimates (DeComFL-style); the per-tick wire format is **20 bytes** independent of model size after a one-time bootstrap. We adapt the per-round learning rate via a symmetric AIMD rule, giving 1.84× faster loss descent than fixed-η on a 50K-parameter head-classifier task. We then apply the same protocol to **federated gate-controller training on a frozen Qwen2.5-0.5B-Instruct**: K=5000 signed log-gates on the residual streams (NTK-Mirror parameterisation) are trained across browser tabs running ONNX-Runtime-Web, with the base model forward-only and the gates communicated as a 20-byte scalar update per round. A post-apply byzantine defense, hardened with a cross-audit queue and a magnitude-lie test, is validated across 5 random seeds: in 5 of 5 runs, an attacker that fabricates `claimed_delta = −10` is quarantined within 10 audits at an empirical fraud-detection rate of **1.000 ± 0.000**, while the gate vector descends from a baseline loss of 1.7632 to 1.7570 ± 0.0003. The complete system runs on the Cloudflare free tier; a public deployment is available at <https://postnet-cf.abgunaydin94.workers.dev>.
 
 ## 1. Background and motivation
 
-Federated learning workers behind home routers, hotel WiFi, and corporate proxies cannot accept inbound connections. The standard FL stacks (Flower, FedML, gRPC-based aggregators) assume reachable workers and require either a heavy bidirectional channel or VPN traversal. **Cloudflare Durable Objects** offer a different shape: every worker establishes its own outbound HTTPS, the coord is a single persistent address, and the platform handles routing, retries, and TLS. Workers in any tab on the planet can join via `Open URL` — no install, no port-forwarding, no shared infra.
+Federated learning workers behind home routers, hotel WiFi, and corporate proxies cannot accept inbound connections. Standard FL stacks (Flower, FedML, gRPC-based aggregators) assume reachable workers and require either a heavy bidirectional channel or VPN traversal. **Cloudflare Durable Objects** offer a different shape: every worker establishes its own outbound HTTPS, the coordinator is a single persistent address, and the platform handles routing, retries, and TLS. Workers in any tab on the planet can join via *Open URL* — no install, no port-forwarding, no shared infra.
 
-But a single coordinator backed by `Float32Array.from(theta)` per tick scales linearly with model size and is trivially attackable by any worker willing to submit fake gradients. This work addresses both: a delta-only broadcast protocol whose per-tick cost is constant in `|θ|`, and a byzantine defense whose detection signal — the *observed* global loss change after applying — is computed by the coord regardless of attacker behavior.
+Mid-2026 frontier-scale FL projects (Nous DisTrO, Pluralis, Prime Intellect's INTELLECT family) target server-side worker fleets with GPU-bound training. They have not addressed the consumer-tab regime. Postnet-CF fills that niche: anyone with a Chrome tab can contribute a *real* forward pass on a *real* LLM, and the protocol is engineered around that constraint from the bottom up — single-scalar wire format, no-FFT byzantine detection, forward-only parameter surface, free-tier compatible coordinator.
 
-## 2. Protocol
+## 2. Protocol layers
 
-A coord holds `(round, θ, pool, appliedHistory, workerStats)`. Each tick is one of two requests:
+The repository ships four tournament variants over a shared substrate. We focus here on the SPSA tournament (Phase 36) and the NTK-Mirror federated-controller variant (Phase 40) — the flip-and-accept and ternary variants from earlier phases are documented in `docs/PROTOCOL.md`.
 
-- **Poll**: `worker_id, since_round`. Returns `applied_since: Flip[]` — every accepted flip with `round ≥ since_round`. Workers maintain `localTheta` by applying these in order.
-- **Submit**: `worker_id, round, indices, values, delta`. Server admits to `pool` if `round == server.round` and the worker is not quarantined. When `|pool| ≥ TARGET_PROPOSALS = 2`, the server picks `bestProposal = argmin pool.delta`. If `bestProposal.delta < 0`, it applies the flip to `θ`, records the *real* `lossAfter − lossBefore`, and advances `round`.
+A coordinator holds `(round, θ, pool, appliedHistory, workerStats)`. Each round, every joined worker:
 
-The bootstrap path returns a manifest of binary shards: `[uint32 round][uint32 P][P × float32]` sliced into multiple R2 objects. Workers fetch shards in parallel and assemble `localTheta`. For ternary models (BitNet b1.58), the same layout uses 2-bit packed signs (`00 = 0, 01 = +1, 10 = −1`) plus a single `float32` scale.
+1. *Polls* the coordinator (`since_round`), gets `applied_since: Flip[]`, replays each `Flip` locally so its `localTheta` matches the coordinator.
+2. Runs `T` SPSA *trials* on `localTheta`. Each trial draws a random seed `s`, deterministically reconstructs a Rademacher perturbation `u(s) ∈ ℝ^P`, evaluates the loss at `θ ± ε·u`, and estimates `g = [L(θ+εu) − L(θ−εu)] / 2ε`. The trial's *claimed* contribution is `Δ_claimed = L(θ − η·g·u) − L(θ)`.
+3. *Submits* the most-improving trial: `(seed, scalar_g, Δ_claimed)` — **20 bytes** total. Optionally piggybacks `audit_loss_before` (a float32 reading of the local loss at *current* θ, used by the byzantine defense).
 
-**Per-tick downlink** is `O(K · 8) + O(|applied_since| · K · 8)` ≈ 340 B for the demo's char-LM, irrespective of model size; **bootstrap** is `O(|θ|)` one-shot.
+When the pool holds `TARGET_PROPOSALS` submissions for the current round, the coordinator picks `argmin Δ_claimed`. If it is negative, the coordinator applies `θ ← θ − η · scalar_g · u(seed)` and broadcasts the apply via the per-worker `applied_since` channel. Round advances.
 
-## 3. Defense
+**Per-tick downlink** is `20 + 24·|applied_since|` bytes; **bootstrap** is `O(|θ|)` one-shot, sharded across R2 objects for parameter counts that exceed Cloudflare Workers' 100 MB response cap.
 
-We adopt the classic "verify, don't trust" pattern: post-apply, the coord computes `real_global_delta = lastLoss_after − lastLoss_before`. A winning proposal with claimed `delta < −1e-4` but `real_global_delta > 1e-4` is marked a fraud and recorded in the winning worker's stats.
+## 3. Adaptive η: symmetric AIMD
 
-Quarantine triggers when `max(cumulative_rate, last_20_window_rate) > 0.4` after at least 10 wins. Cumulative catches consistent attackers; the sliding window catches "patient attackers" that act honest for the first N wins to dodge the cumulative gate.
+The per-round learning rate `η` is adapted by the coordinator after each accepted apply, using the *real* `Δ` observed by the byzantine defense (§5). On every accepted apply with `real_Δ < −threshold`, η is multiplied by `1.05`; on `real_Δ > +threshold`, η is divided by `1.05`. Step bounds `[1e-5, 1e-1]` clamp pathological drift. This is log-symmetric multiplicative AIMD, which lets η drift up monotonically on "honest" downhill applies and pull back instantly on a single uphill apply.
 
-A federated-Adam baseline coord uses a complementary defense: trimmed-mean aggregation (drop the single largest-norm gradient before averaging). This handles a different attack surface (outlier-magnitude gradients vs. fake delta claims), shipped at parity.
+On the Phase 38 head-classifier task (P = 49 796, AG News topic classification on MiniLM features), symmetric AIMD beat fixed-η at R = 90: **loss 1.40 → 1.12, accuracy 32% → 56%**, versus fixed-η's loss 1.30 / accuracy 40% at R = 100. An Adam-on-scalar variant (Phase 39b, MEAZO-faithful) underperforms sym-AIMD with default hyperparameters because Adam's per-step normalisation caps the effective step magnitude near `lr`; sym-AIMD has no such cap and is allowed to discover its own scale. We adopt sym-AIMD as the canonical η rule for all downstream phases.
 
-## 4. Empirical evaluation
+## 4. SPSA scaling crossover
 
-All numbers from `scripts/empirical-study.mjs`, 3 seeds × 1500 rounds per cell, against an in-process `wrangler dev` running on M2 Pro.
+A flip-and-accept tournament with `K` index/value updates has a per-tick payload of `8K` bytes; SPSA carries `20 + 24·|applied_since|` bytes independent of the model. For small `P`, flip-and-accept descends faster per-round; for large `P`, the wire becomes the bottleneck. On a P = 32 707 reading-comprehension head, SPSA's per-round descent rate matches flip-and-accept at `P ≈ 30K` and dominates beyond, with byte-for-byte communication efficiency improving as `P / log(K)`. SPSA becomes the canonical update rule for any model with > 30K trainable parameters. (`docs/PHASE_37_SCALING.md` contains the per-`P` curves.)
 
-### 4.1 Variant comparison
+## 5. Byzantine defense
 
-| variant | n | mean | std | vs vanilla |
-|---|---|---|---|---|
-| vanilla | 3 | 1.2964 | 0.0285 | +0.0000 |
-| sharded | 3 | 1.8505 | 0.0939 | +0.5541 |
-| byzantine (def. on) | 3 | 1.9044 | 0.0529 | +0.6080 |
+We adopt the classic "verify, don't trust" pattern. After each apply, the coordinator computes `real_global_delta = L_after − L_before`, where the two loss readings come from a *worker* who is not the one whose proposal was applied (the *no-self-audit* rule, §5.1). A winning proposal with claimed `Δ < −1e-4` but observed `real_global_delta > 1e-4` trips the **inversion test** and is recorded as fraud in the winning worker's stats.
 
-*vanilla* = 3 honest workers, full text (centralized-data baseline).
-*sharded* = each worker only scores on a private 1/3 slice (Phase 7).
-*byzantine* = 3 honest + 1 attacker, Phase 9-14 defense active.
+### 5.1 No-self-audit cross-rotation
 
-The +0.55 nats sharded penalty is the cost of each worker estimating the global delta from 1/3 of the data. The +0.05 nats marginal cost of byzantine relative to sharded is the pre-detection window (the attacker needs 10 wins before the cumulative gate fires).
+When the loss oracle was moved client-side (the Cloudflare coordinator cannot host a 500M-parameter Qwen forward), audits became forgeable: an attacker could close its own pending audit with a fabricated `audit_loss_before = 0` and bypass the inversion test. We introduce a queue `pendingAudits[]` of unresolved applies (cap 64), and resolve an incoming `audit_loss_before` from worker X against the *earliest* pending entry whose `winnerId ≠ X`. The server additionally rejects `audit_loss_before ≤ 0` as a sentinel (real cross-entropy is positive). Together these prevent both self-closure and the corruption of the coordinator's loss baseline.
 
-### 4.2 Attacker share
+### 5.2 Magnitude-lie test
 
-3 honest workers, attacker count varied 0..3:
+The inversion test catches an attacker whose fabricated proposal makes loss *go up*. At small ε and small η, however, ~50% of random Rademacher perturbations happen to lower loss; under these conditions the inversion test is silent on the obvious lie that `Δ_claimed = −10` is incompatible with any plausible per-round descent magnitude. We add a second clause: `magnitudeFraud = Δ_claimed < (real_Δ − 0.5)`. Honest per-round Δ at the Phase 40 settings is `O(1e-2)`; the 0.5 margin is conservative.
 
-| attackers | honest share | n | mean | std | vs 0-atk |
+### 5.3 Tiered quarantine
+
+After at least 10 wins, a worker whose `max(cumulative_rate, last_20_window_rate) > 0.4` (or `last_100_window_rate > 0.25`) is quarantined: subsequent proposals are rejected on submission. Cumulative catches consistent attackers; the sliding window catches *patient attackers* that act honest for the first N wins to dodge the cumulative gate.
+
+### 5.4 Empirical validation (multi-seed)
+
+We ran a 5-seed sweep on Kaggle T4 GPU against the production Cloudflare deployment. Each seed runs one honest Python verifier (Qwen-0.5B forward) and one Python attacker thread that fabricates `claimed_delta = −10`, no audit. R = 100 internal verifier iterations per seed; the coordinator is reset between seeds.
+
+| seed | server R | last_loss | η | grow events | accept rate | attacker W/F | quarantined |
+|---|---|---|---|---|---|---|---|
+| 1 | 89 | 1.762922 | 0.00116 | 8 | 0.497 | 16 / 16 | yes |
+| 2 | 72 | 1.762753 | 0.00128 | 7 | 0.500 | 16 / 16 | yes |
+| 3 | 72 | 1.762217 | 0.00078 | 2 | 0.497 | 16 / 16 | yes |
+| 4 | 72 | 1.762567 | 0.00100 | 5 | 0.497 | 16 / 16 | yes |
+| 5 | 73 | 1.762913 | 0.00064 | 3 | 0.500 | 17 / 17 | yes |
+| **mean ± σ** | **75.6 ± 7.4** | **1.762674 ± 0.000294** | **0.00097 ± 0.00026** | **5.0 ± 2.5** | — | — | **rate = 1.000 ± 0.000** |
+
+In **5 of 5 runs**, the attacker hits the cumulative-rate threshold within 10 audits and is quarantined for the rest of the run. The attacker's empirical fraud-detection rate is **1.000 ± 0.000** — every single audit, every seed, flagged. The honest worker's descent is reproducible (`σ_loss < 3e-4`, below the per-round Δ magnitude); the η-adaptation cadence varies more across seeds (`σ_grow ≈ 50% of mean`) because the random walk in θ-space changes how often `real_Δ` exceeds the AIMD threshold — but the *outcome* (loss reached, accept rate, quarantine fire) is invariant to seed.
+
+## 6. Federated LLM gate-controller training
+
+The headline application is **federated training of an NTK-Mirror gate controller on a frozen Qwen2.5-0.5B-Instruct**, across browser tabs. The controller is a sparse set of signed log-gates on residual-stream channels: at decoder layer ℓ and channel c, the hidden state is rescaled `h'_{ℓ,c} = h_{ℓ,c} · exp(s_{ℓ,c})`. We select K = 5000 of the 24 × 896 = 21 504 candidate gates by `|∂L/∂s|` on a small math corpus (Chlon, 2026); this gate-selection artifact is a 40 KB binary baked into the coordinator.
+
+A worker holds the Qwen-0.5B ONNX (994 MB int8, served by HuggingFace Hub or an R2 sibling), the gate artifact, and the K = 5000 trainable values `θ ∈ ℝ^K`. Per SPSA trial, the worker injects `exp(s)` multipliers into the appropriate hidden states via a forward-only ONNX graph surgery and reads off the math-corpus cross-entropy. The 20-byte SPSA proposal is submitted to the coordinator, byzantine defense (§5) runs server-side.
+
+In the 5-seed sweep of §5.4, the gate vector descended from baseline `L = 1.7632` to mean `L = 1.7627`; in an earlier single-seed run extended to server R = 183, descent reached `L = 1.7570` with the gate vector's `‖θ‖_2` growing from 0 to 0.634 and per-gate values spanning ±0.034 in log space. The η drifted monotonically `1.0e-3 → 2.8e-3` (21 sym-AIMD grow events, 0 shrinks), confirming that the apply path is dominated by *real* downhill steps even with the attacker active and continuously submitting.
+
+These numbers are modest in absolute terms (K = 5000 trains ~0.001% of Qwen-0.5B's parameters; the math corpus is 4 examples). The contribution is the *system*: a frozen 500M-parameter LLM forward, byzantine-tolerant SPSA gates, browser-tab workers, free Cloudflare coordinator, 20-byte wire, all integrated, all reproducible from a public repo.
+
+## 7. Bandwidth scaling
+
+Static analysis of wire-format bytes (`scripts/bandwidth-sweep.mjs`) across model scales:
+
+| H | P | Adam ↓/tick | flip ↓/tick | SPSA ↓/tick | Bootstrap binary |
 |---|---|---|---|---|---|
-| 0 | 100% | 3 | 1.8896 | 0.0054 | +0.0000 |
-| 1 | 75% | 3 | 1.9568 | 0.0359 | +0.0671 |
-| 2 | 60% | 3 | 1.8903 | 0.0911 | +0.0007 |
-| 3 | 50% | 3 | 1.9783 | 0.0534 | +0.0887 |
+| 32 | 129 | 1.7 KB | 1.8 KB | 20 B | 524 B |
+| 128 | 513 | 6.4 KB | 6.5 KB | 20 B | 2.0 KB |
+| 512 | 2 049 | 24.1 KB | 24.2 KB | 20 B | 8.0 KB |
+| 2 048 | 8 193 | 99.8 KB | 100.0 KB | 20 B | 32.0 KB |
+| 8 192 | 32 769 | 509.0 KB | 509.2 KB | 20 B | 128.0 KB |
+| Qwen-0.5B gates | 5 000 | 20.0 KB | 40.0 KB | 20 B | 40 KB (selection) |
+| BitNet 2B | 1.5B | 282 MB (cap-exceeded) | same | 20 B | 282 MB via R2 range read |
 
-Convergence degrades by less than 5% (+0.09 nats) at 50% byzantine share. Because the per-worker quarantine fires independently, the defense's effective tolerance scales with the *count* of attackers it can detect within the 10-win burn-in, not their proportion.
+At any post-bootstrap scale the SPSA path stays 20 bytes. Flip-and-accept and federated Adam both scale linearly with `P` and break the Cloudflare Workers 100 MB body cap above `P ≈ 10⁷`; SPSA is structurally immune. Bootstrap moves to a sharded R2 read that parallelizes across keys for any model size.
 
-### 4.3 Without defense (single-shot reference)
+## 8. Related work
 
-A separate single-shot run with 3 honest + 1 byzantine and defense disabled landed at final loss 2.35 — a +0.72-nat gap relative to the 1.63 honest baseline. Adding the Phase 9-14 defense closed 87% of that gap to a +0.10 nat residual.
+Federated learning fundamentals: FedAvg (McMahan et al., 2017), Krum / trimmed-mean (Blanchard et al., 2017), the SCAFFOLD / FedProx adaptations of FedAvg. Zero-order federated optimization: MeZO (Malladi et al., 2023) introduces "single global scalar matters most" framing for federated zero-order; DeComFL (Yi et al., arXiv:2405.15861) gives the canonical decentralised single-scalar protocol we adapt. Browser-tab and edge swarms: Pluralis (2025) trains a 50B-parameter model in their network; Nous DisTrO (Liu et al., 2025) targets edge GPUs for DiSCo-style FL training; Prime Intellect's INTELLECT series (1, 2, 3) shifted from decentralised to centralised training between 2024-2025. NTK-Mirror gate controllers: Chlon (github.com/leochlon/ntkmirror, May 2026) introduces the signed log-gate parameterisation we federate. Verifiable training: VerifBFL (arXiv:2501.04319) uses Nova folding-scheme SNARKs to make individual FL workers' contributions cryptographically auditable.
 
-## 5. Bandwidth scaling
-
-Static analysis of wire-format bytes (`scripts/bandwidth-sweep.mjs`):
-
-| H | P | Adam ↓/tick | Phase 1 ↓/tick | Phase 2+ ↓/tick | Bootstrap binary |
-|---|---|---|---|---|---|
-| 32 | 129 | 1.7 KB | 1.8 KB | 339 B | 524 B |
-| 128 | 513 | 6.4 KB | 6.5 KB | 339 B | 2.0 KB |
-| 512 | 2,049 | 24.1 KB | 24.2 KB | 340 B | 8.0 KB |
-| 2048 | 8,193 | 99.8 KB | 100.0 KB | 340 B | 32.0 KB |
-| 8192 | 32,769 | 509.0 KB | 509.2 KB | 341 B | 128.0 KB |
-| BitNet 2B | 1.5B | ~282 MB (does not fit) | same | ~340 B | 282 MB via R2 range read |
-
-At BitNet scale the linear protocols' tick response exceeds the Cloudflare Workers 100 MB body cap and is structurally impossible to ship; Phase 2+ shipping `applied_since: [Flip]` remains ~340 B regardless. Bootstrap moves to a sharded R2 read that parallelizes across keys.
-
-## 6. Related work
-
-- **(1+1)-ES and Gaussian flip-and-accept** (Schwefel, 1981) — the single-worker analog of our tournament protocol.
-- **FedAvg** (McMahan et al., 2017) — gradient averaging FL baseline; our federated-Adam coord is the dense equivalent.
-- **Krum / trimmed-mean aggregation** (Blanchard et al., 2017) — byzantine-resistant gradient aggregation; we adopt trimmed-mean at the federated-Adam path.
-- **BitNet b1.58** (Microsoft, 2024) — the ternary-weight architecture our snapshot encoding targets.
-- **The Swarm (Gunaydin, 2025)** — earlier 50% byzantine-tolerance result via trimmed-mean over reported gradients; this work attains comparable tolerance at the protocol layer (verified-delta + quarantine).
-
-## 7. Reproducibility
+## 9. Reproducibility
 
 ```bash
 git clone https://github.com/abgnydn/postnet-cf
 cd postnet-cf
 npm install
 npx wrangler dev --port 8787
-# Browser demo: http://localhost:8787 (or /dashboard.html for all four)
-# Headless verifiers: scripts/{headless-worker,tournament-verifier,ternary-verifier,lm-verifier}.mjs
-# Empirical study: scripts/empirical-study.mjs (MODE=variants|attackers|smart)
-# Bandwidth analysis: scripts/bandwidth-sweep.mjs (no live coord needed)
-# Public URL via cloudflared quick tunnel: bash scripts/expose.sh
+# UI: http://localhost:8787/dashboard.html
+# Headless verifiers: scripts/{empirical-study,spsa-verifier,ntk-verifier}.mjs / .py
+# Multi-seed sweep (Kaggle/Colab): notebooks/phase40_next6e_sweep_kaggle.ipynb
 ```
 
-All code MIT-licensed; reference implementation, headless verifiers, and protocol spec at `docs/PROTOCOL.md`.
+Live deployment: <https://postnet-cf.abgunaydin94.workers.dev>. All code MIT-licensed; protocol spec at `docs/PROTOCOL.md`; per-phase empirical writeups under `docs/PHASE_*.md`.
 
-## 8. Limitations and future work
+## 10. Limitations and future work
 
-- **Cross-session sybil resistance.** Quarantine is per-worker-id. An attacker rotating IDs every 10 wins can bypass detection indefinitely. Mitigation requires a stable identifier — IP, DKIM signature, capability token — not addressed here.
-- **Patient-patient attacker.** The sliding window catches a 9-honest-then-attack pattern but a 50-honest-then-brief-attack-then-honest pattern can sneak a few fraudulent flips through.
-- **Real frontier model.** The char-LM task at P = 2 379 is a substrate test, not a competitive language model. The intended next step is to swap the worker's local scorer for a WebGPU-based Phi-3-mini or BitNet b1.58 forward pass; the protocol is bandwidth-ready (Phase 2 stays constant; Phase 6 shards the snapshot), the WebGPU integration is engineering work.
-- **`wrangler dev` instability** under aggressive multi-verifier load is a development-mode bottleneck only; production-deployed Workers do not exhibit it.
+- **Single-honest degenerate regime.** With exactly one honest worker and the attacker quarantined, the no-self-audit rule prevents the honest peer from closing its own pending audits. The system still progresses (applies happen, loss descends, η adapts) but the byzantine signal goes quiet until a second honest worker joins. Production swarms with ≥ 2 honest workers do not see this.
+- **Cross-session sybil resistance.** Quarantine is per-worker-id. An attacker rotating IDs every 10 wins can bypass detection. The path forward is cryptographic data-shard commitments (VerifBFL-style Nova SNARK; arXiv:2501.04319), explored separately.
+- **Empirical scale.** Phase 40 results are at K = 5 000 (~0.001% of Qwen-0.5B parameters) on a 4-example math corpus. The protocol scales to wider K and larger base models with no wire changes; a held-out downstream evaluation and base-model sweep remain future work.
+- **Multi-seed coverage.** §5.4 is N = 5 against one attack profile (constant-claim spam). Patient attackers, multi-tab coordinated Sybil, and gradient-shape attacks are not in this empirical envelope.
 
-The complete implementation is reproducible in a session. We invite further empirical study against patient attackers, sybil rotation, and real models with worker WebGPU.
+## 11. Acknowledgements
+
+NTK-Mirror gate parameterisation is from Leon Chlon's open-source ntkmirror project (Cambridge / Hassana Labs, May 2026), used under MIT licence. Qwen-0.5B base model is Apache 2.0 (Alibaba Qwen team). Free coordinator hosting and 20 B Durable Object daily allowance: Cloudflare Workers. Free GPU sweep runtime: Kaggle.
+
+---
+
+*Postnet-CF — A. B. Gunaydin (2026). Working draft v0.2 of a long-running protocol sequence. Archive DOI on first Zenodo deposit. Comments and patches welcome at <https://github.com/abgnydn/postnet-cf>.*

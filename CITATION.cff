@@ -1,0 +1,29 @@
+cff-version: 1.2.0
+title: "Postnet-CF: Federated LLM gate-controller training across browser tabs with verified byzantine defense"
+message: "If you use this software or refer to the protocol, please cite the Zenodo archive."
+type: software
+authors:
+  - given-names: Ahmet Barış
+    family-names: Günaydın
+    email: abgunaydin94@gmail.com
+repository-code: "https://github.com/abgnydn/postnet-cf"
+url: "https://postnet-cf.abgunaydin94.workers.dev"
+abstract: >
+  A federated learning protocol whose workers are unmodified browser tabs and
+  whose coordinator is a Cloudflare Durable Object. Updates are single-scalar
+  SPSA estimates with a 20-byte wire format independent of model size after
+  bootstrap. Includes federated training of NTK-Mirror gate controllers on a
+  frozen Qwen2.5-0.5B-Instruct, with a hardened byzantine defense
+  (no-self-audit cross-rotation + magnitude-lie test) validated across 5
+  random seeds at an attacker fraud-detection rate of 1.000 ± 0.000.
+keywords:
+  - federated learning
+  - SPSA
+  - DeComFL
+  - NTK-Mirror
+  - Cloudflare Workers
+  - byzantine fault tolerance
+  - browser-tab swarm
+  - large language models
+  - Qwen
+license: MIT
