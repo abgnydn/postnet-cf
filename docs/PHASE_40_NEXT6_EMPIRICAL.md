@@ -170,3 +170,50 @@ print(f\"R{d[chr(34)+chr(114)+chr(111)+chr(117)+chr(110)+chr(100)+chr(34)]} loss
 
 (use any state-poll script; `scripts/ntk-empirical-monitor.sh` is the
 quick one used here.)
+
+## Multi-seed sweep — 5 seeds, all quarantined
+
+A follow-up sweep on Kaggle T4 GPU against the **deployed Worker**
+(`postnet-cf.abgunaydin94.workers.dev` with the next-6 fixes live).
+Same setup as above, but the honest worker runs on Kaggle GPU
+instead of local MPS, and the attacker is a pure-Python thread
+(mirrors browser `?attack=1` mode — fabricates `claimed_delta = −10`,
+sends no `audit_loss_before`). Five separate runs with seeds 1–5,
+each resetting the coordinator and running for R=100 internal
+verifier iterations.
+
+| seed | server R | last_loss | η         | grow | accept | atk W/F | quarantined |
+|---|---|---|---|---|---|---|---|
+| 1 | 89 | 1.762922 | 0.00116 | 8 | 0.497 | 16/16 | yes |
+| 2 | 72 | 1.762753 | 0.00128 | 7 | 0.500 | 16/16 | yes |
+| 3 | 72 | 1.762217 | 0.00078 | 2 | 0.497 | 16/16 | yes |
+| 4 | 72 | 1.762567 | 0.00100 | 5 | 0.497 | 16/16 | yes |
+| 5 | 73 | 1.762913 | 0.00064 | 3 | 0.500 | 17/17 | yes |
+| **mean ± σ** | **75.6 ± 7.4** | **1.762674 ± 0.000294** | **0.00097 ± 0.00026** | **5.0 ± 2.5** | — | — | **rate=1.000 ± 0.000** |
+
+The protocol's behaviour is rock-stable across seeds:
+
+- **Attacker fraud rate: 1.000 ± 0.000.** Every single audit landed by
+  the honest worker, in every seed, flagged the attacker. No seed
+  produced even one false-negative. The magnitude-lie test is
+  effectively deterministic given the attack profile.
+- **Quarantine fired in 5 of 5 runs.** The attacker hit the wins ≥ 10 /
+  cumRate > 0.4 threshold cleanly every time and was rejected for the
+  rest of the run.
+- **Final loss is tightly clustered.** σ on `last_loss` is `2.94e-4`,
+  which is below the per-round Δloss magnitude (~`5e-5`). Different
+  SPSA seed sequences produce the same descent magnitude within noise.
+- **η drift varies more than loss.** The grow events range 2 → 8 across
+  seeds (σ ≈ 50% of mean). The shape of the random walk in theta-space
+  changes how often `realDelta` exceeds the `1e-5` threshold; loss
+  outcome is invariant to that, but the η-adaptation cadence isn't.
+- **Accept rate ≈ 50% everywhere.** Half of honest's proposals improve
+  loss enough to apply, consistent with the original N=1 run.
+
+Notebooks used to produce this table:
+- `notebooks/phase40_next6e_sweep_kaggle.ipynb` (the run that fed Table 2)
+- `notebooks/phase40_next6e_sweep.ipynb` (Colab variant; needs a GPU
+  runtime — Colab's free quota was the original blocker)
+
+Per-seed final-state JSONs and verifier logs are in `/kaggle/working/sweep/`
+in the Kaggle notebook output panel.
