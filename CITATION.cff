@@ -8,6 +8,7 @@ authors:
     email: abgunaydin94@gmail.com
 repository-code: "https://github.com/abgnydn/postnet-cf"
 url: "https://postnet-cf.abgunaydin94.workers.dev"
+version: "0.6"
 abstract: >
   A federated learning protocol whose workers are unmodified browser tabs and
   whose coordinator is a Cloudflare Durable Object. Updates are single-scalar

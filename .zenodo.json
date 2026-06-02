@@ -1,0 +1,45 @@
+{
+  "title": "Postnet-CF: Federated LLM gate-controller training across browser tabs with verified byzantine defense",
+  "upload_type": "publication",
+  "publication_type": "workingpaper",
+  "access_right": "open",
+  "license": "MIT",
+  "version": "0.6",
+  "language": "eng",
+  "creators": [
+    {
+      "name": "Günaydın, Ahmet Barış",
+      "affiliation": "Independent researcher"
+    }
+  ],
+  "description": "<p><strong>Postnet-CF</strong> is a federated learning protocol whose workers are unmodified browser tabs and whose coordinator is a single Cloudflare Durable Object. Updates are single-scalar SPSA estimates (DeComFL-style): each proposal carries 20 bytes of information (round, seed, scalar_g, claimed delta, audit_loss_before — five 32-bit fields) independent of model size, and the measured broadcast-only downlink stays under 400 B per tick at any parameter count up to 1.5e9. The reference implementation transports this payload as JSON over HTTP for compatibility with Cloudflare Workers. The per-round learning rate is adapted by a symmetric AIMD rule, giving faster loss descent than fixed-eta on a 50K-parameter head-classifier task.</p><p>The same protocol is then applied to <strong>federated gate-controller training on a frozen Qwen2.5-0.5B-Instruct</strong>: K=5000 signed log-gates on the residual streams (NTK-Mirror parameterisation) are trained across browser tabs running ONNX-Runtime-Web, with the base model forward-only and only the K-gate vector evolving over time. A post-apply byzantine defense — a no-self-audit cross-rotation queue plus a magnitude-lie test — is validated across 5 random seeds: in 5 of 5 runs an attacker that fabricates claimed_delta = -10 is quarantined on the first proposal following its 10th flagged win, at an empirical fraud-detection rate of 1.000 +/- 0.000, while the gate vector descends from a baseline loss of 1.7632 to 1.7627 +/- 0.0003 (multi-seed) and to 1.7570 in a single-seed extended run (R = 183). The complete system runs on the Cloudflare free tier; a public deployment is available at https://postnet-cf.abgunaydin94.workers.dev .</p><p>This deposit archives the source and the working-paper draft (docs/PAPER_DRAFT.md plus the rendered PDF and matplotlib-generated figures under docs/figures/). Every reported number is traceable to a committed empirical writeup under docs/PHASE_*.md and to the verifier scripts under scripts/.</p>",
+  "keywords": [
+    "federated learning",
+    "SPSA",
+    "zeroth-order optimization",
+    "DeComFL",
+    "NTK-Mirror",
+    "Cloudflare Workers",
+    "Durable Objects",
+    "byzantine fault tolerance",
+    "browser-tab swarm",
+    "large language models",
+    "Qwen",
+    "ONNX Runtime Web",
+    "in-browser computation",
+    "reproducible research"
+  ],
+  "notes": "Original code is MIT (see LICENSE). The NTK-Mirror gate parameterisation is adapted from github.com/leochlon/ntkmirror (MIT); the base model Qwen2.5-0.5B-Instruct is Apache-2.0 and is not redistributed in this repository. Generative AI was used as a coding and writing aid; all output was author-reviewed and verified against the empirical artifacts and live deployment.",
+  "related_identifiers": [
+    {
+      "relation": "isSupplementTo",
+      "identifier": "https://github.com/abgnydn/postnet-cf",
+      "scheme": "url"
+    },
+    {
+      "relation": "isSupplementTo",
+      "identifier": "https://postnet-cf.abgunaydin94.workers.dev",
+      "scheme": "url"
+    }
+  ]
+}
