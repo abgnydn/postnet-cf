@@ -12,6 +12,35 @@ Federated learning workers behind home routers, hotel WiFi, and corporate proxie
 
 Mid-2026 frontier-scale FL projects (Nous DisTrO, Pluralis, Prime Intellect's INTELLECT family) target server-side or edge-GPU worker fleets. Their public artifacts have not described browser-tab deployments. Postnet-CF takes the consumer-tab regime as a first-class constraint: anyone with a Chrome tab can contribute a *real* forward pass on a *real* LLM, and the protocol is engineered around that constraint from the bottom up — single-scalar wire format, no-FFT byzantine detection, forward-only parameter surface, free-tier compatible coordinator.
 
+**Contributions.** This work makes three concrete contributions:
+
+1. **A single-scalar federated tournament protocol** whose per-proposal information content is 20 bytes (round + seed + scalar_g + claimed_Δ + audit_loss_before), independent of model size, and whose per-tick downlink (broadcast-only, measured) stays under 400 B at any P up to 1.5 × 10⁹ parameters. The protocol runs on the Cloudflare Workers free tier with a Durable Object as the single persistent coordinator.
+2. **A post-apply byzantine defense** combining a no-self-audit queue with a magnitude-lie test, validated end-to-end against an adversarial worker. Across 5 independent seeds, the defense quarantines the attacker on the first proposal following its 10th flagged win, at an empirical fraud-detection rate of 1.000 ± 0.000.
+3. **A working application to federated LLM training**: NTK-Mirror gate-controller training on a frozen Qwen2.5-0.5B-Instruct, with the base model forward-only in browser tabs running ONNX-Runtime-Web. Loss descends 1.7632 → 1.7627 ± 0.0003 (multi-seed mean) and 1.7632 → 1.7570 (single-seed extended run R = 183) on the K = 5000-gate vector.
+
+### System overview
+
+```
+                        ┌──────────────────────────┐
+                        │  Cloudflare Durable Obj. │
+                        │       coordinator        │
+   ┌─────────────┐      │  ┌────────────────────┐  │      ┌─────────────┐
+   │ browser tab │  ↔   │  │ pool (TARGET=2)    │  │   ↔  │ browser tab │
+   │ Qwen ONNX   │      │  │ pendingAudits[64]  │  │      │ Qwen ONNX   │
+   │ SPSA + θ    │      │  │ θ, η, workerStats  │  │      │ SPSA + θ    │
+   └─────────────┘      │  └────────────────────┘  │      └─────────────┘
+        ↑                          ↑                            ↑
+        │ 20-B proposal            │ broadcast applied flips    │
+        │ + audit_loss_before      │ (~340 B/tick, applied_since[])
+        ↓                          ↓                            ↓
+   ┌─────────────┐                                       ┌─────────────┐
+   │ browser tab │  ─────────────  ··· ──────────────►   │ browser tab │
+   │  (attacker) │      no-self-audit + magnitude-lie    │   (honest)  │
+   └─────────────┘            byzantine defense          └─────────────┘
+```
+
+**Figure 1.** Postnet-CF system overview. Every worker is an unmodified browser tab running an ONNX-Runtime-Web forward pass on a frozen base LLM. Workers communicate exclusively with a single Cloudflare Durable Object via outbound HTTPS — no inbound connectivity, no peer-to-peer, no install. Per-round proposals are five 32-bit fields (20 B of information); per-round broadcasts stay under 400 B regardless of model size.
+
 ## 2. Protocol layers
 
 The repository ships four tournament variants over a shared substrate. We focus here on the SPSA tournament (Phase 36) and the NTK-Mirror federated-controller variant (Phase 40) — the flip-and-accept and ternary variants from earlier phases are documented in `docs/PROTOCOL.md`.
@@ -69,6 +98,14 @@ We ran a 5-seed sweep on Kaggle T4 GPU against the production Cloudflare deploym
 
 In **5 of 5 runs**, the attacker's cumulative fraud rate reaches 1.0 on the 10th win (since each of its wins is flagged), making the worker eligible for quarantine; the *very next* proposal it submits is rejected on the cumRate > 0.4 ∧ wins ≥ 10 gate. The empirical fraud-detection rate is **1.000 ± 0.000** — every single audit, every seed, flagged. The W=16/F=16 figure in the table reflects audits that landed during the network round-trip between the 10th win and the next-submission quarantine fire, all of which (correctly) closed at 100% fraud rate without changing the outcome.
 
+![](figures/fig-multiseed.pdf)
+
+**Figure 2.** Multi-seed sweep result. *Left:* per-seed loss descent from baseline (R = 0, L = 1.7632). All five seeds produced near-identical descent magnitude (σ = 2.9 × 10⁻⁴, below per-round Δloss). *Right:* attacker wins (all flagged as fraud, red bars) vs sym-AIMD η-adaptation events (blue line). Detection rate is invariant to seed; η-adaptation cadence varies more because the random walk in θ-space changes how often the AIMD threshold is crossed.
+
+![](figures/fig-trajectory.pdf)
+
+**Figure 3.** Single-seed extended run (N = 1, R = 183, attacker active throughout). *Left:* test loss descends from 1.7632 to 1.7570 (−0.0062), with the descent rate stabilising at ≈ 3.5 × 10⁻⁵ per round after η has reached its self-organised plateau. *Right:* η drifts monotonically 1.0e-3 → 2.8e-3 via 21 sym-AIMD grow events and 0 shrink events — every accepted apply lowered the measured loss past the 1e-5 threshold.
+
 ### 5.5 Carryover from char-LM empirical study (Phase 9–14)
 
 The same byzantine defense was previously evaluated on a small char-LM (P = 2 379) with `n = 3` honest workers, `0..3` attackers, and `n_seeds = 3` per cell (Phase 14, prior commit `db3a78c`):
@@ -103,6 +140,10 @@ Per-tick downlink (server's JSON response) across model scales, as measured by `
 
 **Table 2.** Per-tick downlink across model scales, as measured by `scripts/bandwidth-sweep.mjs`. The federated-Adam and flip-and-accept paths scale linearly in P; the broadcast-only path (used by SPSA) stays under 400 B regardless of model size.
 
+![](figures/fig-bandwidth.pdf)
+
+**Figure 4.** Bandwidth scaling on log–log axes. Both federated Adam (full-θ download) and flip-and-accept (8K-byte index/value pairs) scale linearly in `P` and exceed Cloudflare Workers' 100 MB response cap above `P ≈ 10⁷`. The broadcast-only path used by SPSA stays under 400 B at every measured `P`, because the per-tick payload encodes only the *applied* flip (single seed + scalar_g + bookkeeping), not the model.
+
 Federated Adam and flip-and-accept scale linearly with `P`; both break Cloudflare Workers' 100 MB response cap above `P ≈ 10⁷`. The broadcast-only path — used by SPSA — stays under 400 B regardless of model size, because the per-round payload encodes only the *applied* flips (single seed + scalar_g + small bookkeeping), not the model. The proposal *upload* carries 20 B of information per submission. For the Qwen-0.5B gates application (P = 5000), the one-time bootstrap is the 40 KB gate-selection artifact; subsequent operation is broadcast-only.
 
 ## 8. Related work
@@ -110,6 +151,22 @@ Federated Adam and flip-and-accept scale linearly with `P`; both break Cloudflar
 Evolutionary baselines: the single-winner tournament with parameter "flips" is a federated reformulation of the **(1+1) evolution strategy** (Schwefel, 1981) — a single child is generated per round, accepted if it improves the fitness on the parent population (here, the global θ). Federated learning fundamentals: **FedAvg** (McMahan et al., 2017, arXiv:1602.05629), **Krum / trimmed-mean** (Blanchard et al., 2017, arXiv:1703.02757), the SCAFFOLD / FedProx adaptations of FedAvg. Zero-order federated optimization: **MeZO** (Malladi et al., 2023, arXiv:2305.17333) introduces "memory-efficient zeroth-order optimizer" for LLM fine-tuning; **DeComFL** (Li et al., 2024, arXiv:2405.15861, "Achieving Dimension-Free Communication in Federated Learning via Zeroth-Order Optimization") gives the canonical decentralised single-scalar protocol we adapt. Browser-tab and edge swarms: **Pluralis Research** (pluralis.ai) builds model-parallel decentralised "Protocol Learning"; **Nous DisTrO** (Nous Research, 2024, preliminary report at github.com/NousResearch/DisTrO) targets edge GPUs with a distributed-training-over-the-internet optimizer family with ~1 000–10 000× communication reduction; **Prime Intellect's INTELLECT-3** (Nov 2025, 106B-param MoE, GLM 4.5 Air-based) explicitly used a centralised 512×H200 cluster, marking the project's shift from decentralised to centralised training. **NTK-Mirror** gate controllers: Chlon (github.com/leochlon/ntkmirror, May 2026, MIT-licensed, Hassana Labs) introduces the signed log-gate parameterisation we federate. **Verifiable training:** VerifBFL (arXiv:2501.04319) uses zk-SNARKs with incremental verifiable computation to make individual FL workers' contributions cryptographically auditable.
 
 **Prior work by this author:** The Swarm (Günaydın, 2025; see `docs/PHASE_*.md` and the predecessor postnet repository) developed the original 50% byzantine-tolerance result via trimmed-mean over reported gradients; this work attains comparable tolerance at the protocol layer through verified-delta + quarantine.
+
+### 8.1 Direct comparison
+
+To our knowledge, no other published FL protocol combines a single-scalar wire format with a browser-tab deployment and a tested byzantine defense in a single system. The closest entries differ on one or more of these axes:
+
+| System | worker | per-round upload (theoretical min) | byzantine-tolerant | deployable to a browser tab | open + free to reproduce |
+|---|---|---|---|---|---|
+| **DDP / FedAvg** (McMahan 2017) | server GPU | `O(P)` (full grad / θ) | no (vanilla) | no | yes (code, not infra) |
+| **DiLoCo** (DeepMind 2023) | datacenter cluster | `O(P)` outer-loop, infrequent | no | no | partial (Google) |
+| **OpenDiLoCo** (Prime Intellect 2024) | A100 cluster | `O(P)` infrequent | no | no | yes (Prime cluster) |
+| **DeMo** (Peng 2024) | GPU peer | `O(P/k)` via DCT chunks (k≈100) | no | no | yes (single-script) |
+| **DeComFL** (Li 2024) | server peer | `8 B` scalar, but `O(P)` shared-seed setup | no | partially (CPU OK) | yes (code) |
+| **INTELLECT-3** (Prime Intellect 2025) | 512×H200 cluster | `O(P)` | no | no | inference weights only |
+| **Postnet-CF (this work)** | browser tab | **20 B information** (JSON in current impl) | **yes (no-self-audit + magnitude-lie)** | **yes** | **yes (CF free tier + this repo)** |
+
+**Table 3.** Comparison of recent federated and decentralised training systems on dimensions postnet-cf optimises for. The 20-B information-content figure is the protocol's theoretical minimum (five 32-bit fields per proposal); current implementation transports as JSON over HTTP for Cloudflare Workers compatibility. DeComFL's `8 B` figure is per-scalar but requires a shared-seed bootstrap that scales with model parameter count; postnet-cf's bootstrap is `O(|θ|)` once and then broadcast-only. None of the comparison systems implement an end-to-end byzantine defense as part of the protocol.
 
 ## 9. Reproducibility
 

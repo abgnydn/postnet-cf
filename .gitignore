@@ -8,3 +8,8 @@ node_modules/
 .DS_Store
 public/data/*.onnx
 public/data/*.onnx.data
+logs/
+.claude/
+# rendered paper outputs — regeneratable from docs/PAPER_DRAFT.md;
+# uploaded to Zenodo per version.
+docs/postnet-cf-v*.pdf
