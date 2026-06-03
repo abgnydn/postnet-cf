@@ -9,6 +9,14 @@ authors:
 repository-code: "https://github.com/abgnydn/postnet-cf"
 url: "https://postnet-cf.abgunaydin94.workers.dev"
 version: "0.6"
+doi: 10.5281/zenodo.20506887
+identifiers:
+  - type: doi
+    value: 10.5281/zenodo.20506887
+    description: Concept DOI (resolves to the latest version)
+  - type: doi
+    value: 10.5281/zenodo.20506888
+    description: Version DOI for the v0.6 archive
 abstract: >
   A federated learning protocol whose workers are unmodified browser tabs and
   whose coordinator is a Cloudflare Durable Object. Updates are single-scalar

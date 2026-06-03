@@ -1,6 +1,6 @@
 # Postnet-CF: Federated LLM gate-controller training across browser tabs with verified byzantine defense
 
-*Working draft v0.6 — not peer reviewed. Zenodo DOI on first archive.*
+*Working draft v0.6 — not peer reviewed. Zenodo archive: [10.5281/zenodo.20506888](https://doi.org/10.5281/zenodo.20506888) (v0.6); concept DOI [10.5281/zenodo.20506887](https://doi.org/10.5281/zenodo.20506887) always resolves to the latest version.*
 
 ## Abstract
 
@@ -197,4 +197,4 @@ The postnet-cf repository itself is MIT-licensed (`LICENSE`).
 
 ---
 
-*Postnet-CF — A. B. Gunaydin (2026). Working draft v0.6 of a long-running protocol sequence. Archive DOI on first Zenodo deposit. Comments and patches welcome at <https://github.com/abgnydn/postnet-cf>.*
+*Postnet-CF — A. B. Gunaydin (2026). Working draft v0.6 of a long-running protocol sequence. Zenodo DOI [10.5281/zenodo.20506887](https://doi.org/10.5281/zenodo.20506887) (concept; v0.6 archive [10.5281/zenodo.20506888](https://doi.org/10.5281/zenodo.20506888)). Comments and patches welcome at <https://github.com/abgnydn/postnet-cf>.*
