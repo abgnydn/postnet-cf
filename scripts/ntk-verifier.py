@@ -188,6 +188,15 @@ def main() -> int:
     ap.add_argument("--dtype", default="fp32", choices=["fp32", "bf16", "fp16"])
     ap.add_argument("--batch-size", type=int, default=4)
     ap.add_argument("--max-length", type=int, default=256)
+    ap.add_argument("--eval", type=Path, default=None,
+                    help="held-out eval JSONL (disjoint from --train). When set, "
+                         "eval loss at the current θ is measured every round and "
+                         "written to --trajectory. A monotone eval-loss drop is the "
+                         "generalisation signal (Phase 40 learning run).")
+    ap.add_argument("--eval-batch-size", type=int, default=None,
+                    help="how many eval examples to use (default: all in --eval)")
+    ap.add_argument("--trajectory", type=Path, default=None,
+                    help="write per-round (round,train_loss,eval_loss,eta) CSV here")
     ap.add_argument("--reset", action="store_true", help="reset server state on startup")
     ap.add_argument("--seed", type=int, default=None,
                     help="seed numpy + torch for reproducible SPSA seed selection (Phase 40 next-6e multi-seed sweep)")
@@ -263,15 +272,35 @@ def main() -> int:
     # per-round shard; matches the "private worker shard" pattern from earlier phases).
     batch = make_batch(tok, examples[:args.batch_size], device=device, max_length=args.max_length)
 
+    # Held-out eval batch (Phase 40 learning run). Loaded from a JSONL that is
+    # disjoint from --train; loss here is never optimised against, so a drop is
+    # genuine generalisation rather than memorisation of the train batch.
+    eval_batch = None
+    if args.eval is not None:
+        eval_examples: list[Example] = []
+        with args.eval.open() as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                obj = json.loads(line)
+                eval_examples.append(Example(prompt=obj["prompt"], completion=obj["completion"]))
+        ebs = args.eval_batch_size or len(eval_examples)
+        eval_batch = make_batch(tok, eval_examples[:ebs], device=device, max_length=args.max_length)
+        print(f"loaded {len(eval_examples)} held-out eval examples (using {ebs})")
+
     @torch.no_grad()
-    def loss_with_raw(raw_np: np.ndarray) -> float:
+    def loss_on(raw_np: np.ndarray, b: dict) -> float:
         # Copy custom raw values into the controller's nn.Parameter; ctrl.s is a
         # property that recomputes from raw every forward.
         ctrl.raw.data.copy_(torch.from_numpy(raw_np.astype(np.float32)).to(device))
-        out = model(input_ids=batch["input_ids"],
-                    attention_mask=batch.get("attention_mask"),
+        out = model(input_ids=b["input_ids"],
+                    attention_mask=b.get("attention_mask"),
                     use_cache=False)
-        return float(causal_loss_from_logits(out.logits, batch["labels"]).item())
+        return float(causal_loss_from_logits(out.logits, b["labels"]).item())
+
+    def loss_with_raw(raw_np: np.ndarray) -> float:
+        return loss_on(raw_np, batch)
 
     base_loss = loss_with_raw(theta)
     print(f"loss @ bootstrap (θ all zeros): {base_loss:.4f}")
@@ -303,7 +332,8 @@ def main() -> int:
         # claimed_Δ, AND the trusted-auditor signal the server uses to
         # compute real_Δ for the previous round's winner.
         loss_before = loss_with_raw(theta)
-        history.append((round_num, loss_before))
+        eval_loss = loss_on(theta, eval_batch) if eval_batch is not None else None
+        history.append((round_num, loss_before, eval_loss, current_eta))
 
         # K SPSA trials, all using server's CURRENT η for the trial step.
         best = None
@@ -353,19 +383,41 @@ def main() -> int:
             grow = reported.get("eta_grow_events", "?")
             shr = reported.get("eta_shrink_events", "?")
             quar = " QUAR" if reported.get("quarantined") else ""
+            eval_str = f"  eval={eval_loss:.4f}" if eval_loss is not None else ""
             print(f"  it={it+1:4d}  server_r={round_num:4d}  "
-                  f"loss_before={loss_before:.4f}  best_Δ={best['delta']:+.4f}  "
+                  f"loss_before={loss_before:.4f}{eval_str}  best_Δ={best['delta']:+.4f}  "
                   f"η={current_eta:.2e}  grow={grow} shr={shr}  "
                   f"||θ||={float(np.linalg.norm(theta)):.4f}{quar}  ({elapsed:.1f}s)")
 
     # ── 6. final eval ────────────────────────────────────────────────────────
     final_loss = loss_with_raw(theta)
     print()
-    print(f"start loss:  {base_loss:.4f}")
-    print(f"final loss:  {final_loss:.4f}")
-    print(f"Δ:           {final_loss - base_loss:+.4f}")
+    print(f"start train loss:  {base_loss:.4f}")
+    print(f"final train loss:  {final_loss:.4f}")
+    print(f"train Δ:           {final_loss - base_loss:+.4f}")
+    if eval_batch is not None:
+        # Held-out generalisation summary. base/final measured at θ_bootstrap
+        # (all-zeros gates = base model) and θ_final.
+        eval_start = history[0][2] if history else None
+        eval_final = loss_on(theta, eval_batch)
+        if eval_start is not None:
+            print(f"start eval  loss:  {eval_start:.4f}  (held-out, never trained on)")
+            print(f"final eval  loss:  {eval_final:.4f}")
+            print(f"eval  Δ:           {eval_final - eval_start:+.4f}  "
+                  f"{'← generalises' if eval_final < eval_start else '← no held-out gain'}")
     print(f"||θ_final||: {float(np.linalg.norm(theta)):.4f}")
     print(f"max |θ_i|:   {float(np.max(np.abs(theta))):.4f}")
+
+    # ── 7. trajectory dump (for plotting train vs eval descent) ───────────────
+    if args.trajectory is not None:
+        import csv
+        with args.trajectory.open("w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["round", "train_loss", "eval_loss", "eta"])
+            for r, tl, el, et in history:
+                w.writerow([r, f"{tl:.6f}", "" if el is None else f"{el:.6f}", f"{et:.6g}"])
+        print(f"trajectory: {args.trajectory} ({len(history)} rows)")
+
     return 0 if final_loss < base_loss else 1
 
 
