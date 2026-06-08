@@ -415,7 +415,12 @@ async function submitBest(round, seed, scalar_g, delta, audit_loss_before) {
 }
 function applyDelta(applied) {
   reconstructPerturbation(applied.seed, uScratch);
-  const k = currentEta * applied.scalar_g;
+  // Phase 40 next-7: replay with the flip's server-stamped η, not currentEta,
+  // so this replica stays bit-identical to the server. Replaying with a stale
+  // currentEta is what drifted the 2-worker replicas apart (‖θ‖ 0.597 vs 0.408)
+  // and false-quarantined both honest workers.
+  const flipEta = typeof applied.eta === "number" ? applied.eta : currentEta;
+  const k = flipEta * applied.scalar_g;
   for (let i = 0; i < K; i++) localTheta[i] -= k * uScratch[i];
 }
 async function reconcile(resp) {

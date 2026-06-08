@@ -118,11 +118,21 @@ interface SpsaProposal {
   seed: number;
   scalar_g: number;
   delta: number;
+  // Phase 40 next-7: the proposer's own pre-step loss on ITS replica, sent as
+  // audit_loss_before alongside the proposal. Used as the audit baseline for
+  // the round this proposal wins, so realΔ is measured from the winner's own
+  // θ rather than the floating lastLoss set by whichever worker ticked last.
+  lossBefore: number | null;
 }
 interface SpsaAppliedFlip {
   round: number;
   seed: number;
   scalar_g: number;
+  // Phase 40 next-7: the EXACT η the server applied this flip with. Workers
+  // must replay with this, not their current η, or replicas drift apart
+  // (the 2-honest-worker run diverged to ‖θ‖ 0.597 vs 0.408, which broke the
+  // cross-worker audit and false-quarantined both honest workers).
+  eta: number;
 }
 
 export class TournamentNtk extends DurableObject<Env> {
@@ -468,6 +478,8 @@ export class TournamentNtk extends DurableObject<Env> {
               seed: body.seed!,
               scalar_g: body.scalar_g!,
               delta: body.delta!,
+              lossBefore: typeof body.audit_loss_before === "number" && body.audit_loss_before > 0
+                ? body.audit_loss_before : null,
             };
           }
           this.proposalsReceived += 1;
@@ -491,6 +503,7 @@ export class TournamentNtk extends DurableObject<Env> {
           round: this.round,
           seed: this.bestProposal!.seed,
           scalar_g: this.bestProposal!.scalar_g,
+          eta: this.currentEta,   // Phase 40 next-7: exact η so replicas stay bit-identical
         };
         this.appliedHistory.push(appliedFlip);
         if (this.appliedHistory.length > 1000) this.appliedHistory.shift();
@@ -501,12 +514,18 @@ export class TournamentNtk extends DurableObject<Env> {
         // attacker repeatedly wins before honest peer audits) can stack
         // multiple pending entries; we cap at PENDING_AUDIT_MAX and drop
         // the oldest if exceeded.
-        if (this.lastLoss !== null) {
+        // Phase 40 next-7: prefer the WINNER's own reported loss_before as the
+        // audit baseline (savedLossBeforeApply). Falls back to lastLoss only if
+        // the winner sent no audit_loss_before. This, plus per-flip η, makes
+        // realΔ a clean span on the canonical θ-series instead of a comparison
+        // across drifted replicas (the false-quarantine fix).
+        const auditBaseline = this.bestProposal!.lossBefore ?? this.lastLoss;
+        if (auditBaseline !== null) {
           this.pendingAudits.push({
             round: this.round,
             workerId: this.bestProposal!.worker_id,
             claimedDelta: this.bestProposal!.delta,
-            savedLossBeforeApply: this.lastLoss,
+            savedLossBeforeApply: auditBaseline,
           });
           if (this.pendingAudits.length > PENDING_AUDIT_MAX) {
             this.pendingAudits.shift();

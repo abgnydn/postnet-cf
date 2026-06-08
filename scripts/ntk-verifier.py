@@ -325,7 +325,11 @@ def main() -> int:
                 if flip["round"] < round_num:
                     continue
                 u_flip = reconstruct_perturbation(int(flip["seed"]), K)
-                theta -= current_eta * float(flip["scalar_g"]) * u_flip
+                # Phase 40 next-7: replay with the EXACT η the server applied
+                # this flip with (flip["eta"]), not our current η — otherwise
+                # replicas drift and the cross-worker audit false-quarantines.
+                flip_eta = float(flip.get("eta", current_eta))
+                theta -= flip_eta * float(flip["scalar_g"]) * u_flip
         round_num = int(pulled["round"])
 
         # local loss at current θ — this is "loss_before" for THIS round's
@@ -371,9 +375,10 @@ def main() -> int:
             f = reported["last_applied"]
             if f["round"] == round_num:    # the round that just advanced
                 u_flip = reconstruct_perturbation(int(f["seed"]), K)
-                # NOTE: the server applied with THIS round's η; we replay with
-                # the same value (already updated above from reported.eta).
-                theta -= current_eta * float(f["scalar_g"]) * u_flip
+                # Phase 40 next-7: replay with the flip's own η (server-stamped),
+                # not current η — keeps this replica bit-identical to the server.
+                flip_eta = float(f.get("eta", current_eta))
+                theta -= flip_eta * float(f["scalar_g"]) * u_flip
                 round_num = int(reported["round"])
         else:
             round_num = int(reported["round"])
