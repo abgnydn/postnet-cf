@@ -326,6 +326,7 @@ def main() -> int:
     # workers give deterministic full-rate co-training to exactly `rounds` rounds
     # with no GPU-speed desync and a bit-identical replica (single θ array).
     def reconstruct_apply(flip):
+        nonlocal theta   # augmented assignment below binds theta locally otherwise
         u = reconstruct_perturbation(int(flip["seed"]), K)
         e = float(flip.get("eta", current_eta))   # per-flip η (server-stamped)
         theta -= e * float(flip["scalar_g"]) * u
