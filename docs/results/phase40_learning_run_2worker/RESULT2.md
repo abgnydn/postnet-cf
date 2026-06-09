@@ -1,5 +1,14 @@
 # Phase 40 — 2-honest-worker learning run (confirm + a falsification)
 
+> **⚠ CORRECTION (added after the fix run).** The held-out Δ = **−0.0089** reported below
+> is a **drift artifact** and is retracted. It was measured on worker-0's *corrupted*
+> local θ (‖θ‖ 0.597), inflated by the same replica drift documented here. After the
+> per-flip-η + winner-baseline fix (commit `fd27a5c`), the **true** replica-consistent
+> held-out Δ at round 179 is **−0.0036** — see
+> `../phase40_learning_run_2worker_fixed/RESULT2.md`. The *qualitative* findings below
+> (false-positive quarantine, the §10 falsification, the traced mechanism) stand; only
+> the magnitude number was drift-inflated.
+
 - **Corpus:** 32 train / 32 held-out (disjoint, identical to the single-worker run → directly comparable).
 - **Workers:** 2 honest, one Qwen2.5-0.5B per GPU (Kaggle T4×2), K=5000 gates, deployed coordinator.
 - **Intended:** R=300 full-rate. **Actual:** server stalled at **round 179** (see "the bug").
