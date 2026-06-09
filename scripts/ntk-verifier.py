@@ -197,6 +197,12 @@ def main() -> int:
                     help="how many eval examples to use (default: all in --eval)")
     ap.add_argument("--trajectory", type=Path, default=None,
                     help="write per-round (round,train_loss,eval_loss,eta) CSV here")
+    ap.add_argument("--virtual-workers", type=int, default=1,
+                    help="run N logical workers in lockstep within ONE process "
+                         "(N>=2 gives deterministic full-rate co-training: one θ, "
+                         "two worker-ids cross-auditing, server advances exactly one "
+                         "round per loop iteration — no GPU-speed desync). Default 1 "
+                         "= the original single-worker loop.")
     ap.add_argument("--reset", action="store_true", help="reset server state on startup")
     ap.add_argument("--seed", type=int, default=None,
                     help="seed numpy + torch for reproducible SPSA seed selection (Phase 40 next-6e multi-seed sweep)")
@@ -313,7 +319,75 @@ def main() -> int:
     # round's winner). Start from CLI value; pull from /tick responses.
     current_eta = float(args.eta)
     t_start = time.time()
-    for it in range(args.rounds):
+
+    # ── Phase 40 next-7: lockstep N-virtual-worker mode ──────────────────────
+    # One process, one θ, N worker-ids submitting one proposal each per round.
+    # The server (TARGET_PROPOSALS=2) advances on the 2nd submit, so two virtual
+    # workers give deterministic full-rate co-training to exactly `rounds` rounds
+    # with no GPU-speed desync and a bit-identical replica (single θ array).
+    def reconstruct_apply(flip):
+        u = reconstruct_perturbation(int(flip["seed"]), K)
+        e = float(flip.get("eta", current_eta))   # per-flip η (server-stamped)
+        theta -= e * float(flip["scalar_g"]) * u
+
+    def run_trials(eta: float, lb: float) -> dict:
+        best = None
+        for _ in range(args.trials):
+            seed = int(np.random.randint(0, 2**32 - 1)) & 0xFFFFFFFF
+            u = reconstruct_perturbation(seed, K)
+            lp = loss_with_raw(theta + args.epsilon * u)
+            lm = loss_with_raw(theta - args.epsilon * u)
+            g = (lp - lm) / (2.0 * args.epsilon)
+            d = loss_with_raw(theta - eta * g * u) - lb
+            if best is None or d < best["delta"]:
+                best = {"seed": seed, "scalar_g": float(g), "delta": float(d)}
+        return best
+
+    if args.virtual_workers >= 2:
+        wids = [f"{worker_id}-v{i}" for i in range(args.virtual_workers)]
+        print(f"lockstep mode: {len(wids)} virtual workers {wids}")
+        for it in range(args.rounds):
+            pulled = http_post_json(f"{args.coord}/api/ntk/tick",
+                                    {"worker_id": wids[0], "since_round": round_num})
+            if isinstance(pulled.get("eta"), (int, float)):
+                current_eta = float(pulled["eta"])
+            for flip in pulled.get("applied_since") or []:
+                if flip["round"] < round_num:
+                    continue
+                reconstruct_apply(flip)
+            round_num = int(pulled["round"])
+
+            loss_before = loss_with_raw(theta)
+            eval_loss = loss_on(theta, eval_batch) if eval_batch is not None else None
+            history.append((round_num, loss_before, eval_loss, current_eta))
+
+            reported = None
+            for wid in wids:
+                best = run_trials(current_eta, loss_before)
+                reported = http_post_json(f"{args.coord}/api/ntk/tick", {
+                    "worker_id": wid, "round": round_num,
+                    "seed": best["seed"], "scalar_g": best["scalar_g"], "delta": best["delta"],
+                    "since_round": round_num, "audit_loss_before": float(loss_before),
+                })
+                if isinstance(reported.get("eta"), (int, float)):
+                    current_eta = float(reported["eta"])
+            if reported and reported.get("advanced") and reported.get("last_applied"):
+                f = reported["last_applied"]
+                if int(f["round"]) == round_num:
+                    reconstruct_apply(f)
+                    round_num = int(reported["round"])
+            if (it + 1) % 5 == 0 or it == 0:
+                elapsed = time.time() - t_start
+                grow = reported.get("eta_grow_events", "?") if reported else "?"
+                shr = reported.get("eta_shrink_events", "?") if reported else "?"
+                eval_str = f"  eval={eval_loss:.4f}" if eval_loss is not None else ""
+                print(f"  it={it+1:4d}  server_r={round_num:4d}  "
+                      f"loss_before={loss_before:.4f}{eval_str}  best_Δ={best['delta']:+.4f}  "
+                      f"η={current_eta:.2e}  grow={grow} shr={shr}  "
+                      f"||θ||={float(np.linalg.norm(theta)):.4f}  ({elapsed:.1f}s)")
+
+    # Original single-worker loop (no-op when running in lockstep mode).
+    for it in (range(args.rounds) if args.virtual_workers < 2 else range(0)):
         # poll for current round (handles other workers' applied flips)
         pulled = http_post_json(f"{args.coord}/api/ntk/tick",
                                 {"worker_id": worker_id, "since_round": round_num})
