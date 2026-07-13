@@ -61,6 +61,10 @@ Durable Object. The `/ntk.html` demo runs this model forward *in the tab* via
 `onnxruntime-web` and federated-SPSA-trains a sparse NTK-Mirror gate
 controller (K = 5000 signed log-gates) across everyone who opens the URL.
 
+**▶ Live demo:** <https://postnet-cf.abgunaydin94.workers.dev/ntk> — open it,
+click Join, and your tab starts federated-SPSA-training against everyone else
+who's connected. No install, no clone; this model streams in from the Hub.
+
 ## What this is
 
 - **Base:** [Qwen/Qwen2.5-0.5B-Instruct](https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct)
