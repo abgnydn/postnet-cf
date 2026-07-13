@@ -28,12 +28,16 @@
  * tokenizer, 4 examples × 32 tokens) are pre-computed and baked in at
  * the top of this file — same training corpus the Python verifier uses.
  *
- * Hosting:
- *   local dev: wrangler dev serves /data/qwen05b-with-gates-int8.onnx
- *              at any size (file is on disk, not bundled).
- *   production: 866 MB > CF assets limit. Upload to HuggingFace Hub
- *               (free public CDN) and point ONNX_URL at the HF URL.
- *               See docs/PHASE_40_NEXT4B_QWEN_ONNX.md.
+ * Hosting (Phase 40 next-7):
+ *   production (default): the ~906 MB int8 ONNX is hosted on HuggingFace Hub
+ *              (free public CDN, CORS-open, range-capable). The deployed
+ *              worker fetches it straight from HF — a stranger just opens the
+ *              *.workers.dev URL and joins, no local server needed.
+ *   local dev: ~906 MB > CF's 25 MiB assets cap, so localhost still serves the
+ *              file from a sibling http-server on :8788 (auto-selected when the
+ *              page is on localhost). Override anywhere with ?onnx=<url>.
+ *   To (re)publish the artifact: scripts/upload-onnx-hf.py.
+ *   See docs/PHASE_40_NEXT4B_QWEN_ONNX.md.
  */
 
 import * as ort from "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/ort.min.mjs";
@@ -46,27 +50,37 @@ ort.env.wasm.numThreads = 1;  // we're not cross-origin-isolated in CF assets
 
 const ARTIFACT_URL = "/data/qwen05b-math-gates-k5000.bin";
 
-// The 866 MB int8 ONNX can't live in public/ — wrangler caps assets at
-// 25 MiB. For LOCAL dev: serve it from a sibling directory via a CORS-
-// friendly static server (one-liner below). For PROD: upload to HF Hub
-// or R2 and point this URL there.
+// The ~906 MB int8 ONNX can't live in public/ — wrangler caps assets at
+// 25 MiB — so it's hosted externally. Phase 40 next-4-b session 5:
+// optimum-cli + scripts/inject-gates-onnx.py produced a 2.4 GB fp32 ONNX
+// that ORT-web aborted on (load step), and Chrome's ArrayBuffer max ~2 GB
+// prevented loading the sidecar anyway. We int8-quantize-dynamic the gated
+// ONNX → ~906 MB single file (no sidecar), fits in one ArrayBuffer, and
+// ORT-web 1.22 loads it.
 //
+// Phase 40 next-7 — resolution order for the ONNX URL:
+//   1. ?onnx=<url> query param       (explicit override, wins everywhere)
+//   2. localhost → sibling :8788     (local dev; start the server below)
+//   3. otherwise → HuggingFace Hub   (prod default; zero-config for strangers)
+//
+// Local dev server (only needed on localhost; publish with upload-onnx-hf.py):
 //   # in a separate terminal:
 //   cd ~/postnet-cf-onnx
 //   npx http-server -p 8788 --cors -c-1 .
-//   # then the worker on http://localhost:8787 can fetch from :8788.
-//
-// Override via URL query, e.g. ?onnx=https://huggingface.co/.../model.onnx
+//   # then the worker on http://localhost:8787 fetches from :8788.
+//   # (or skip it and append ?onnx=<HF url> to test the hosted file locally)
 const _qsOnnx = (() => {
   if (typeof location === "undefined") return null;
   return new URLSearchParams(location.search).get("onnx");
 })();
-// Phase 40 next-4-b session 5: optimum-cli + scripts/inject-gates-onnx.py
-// produced a 2.4 GB fp32 ONNX that ORT-web aborted on (load step), and
-// Chrome's ArrayBuffer max ~2 GB prevented loading the sidecar anyway.
-// We int8-quantize-dynamic the gated ONNX → 994 MB single file (no sidecar),
-// fits in one ArrayBuffer, and ORT-web 1.22 loads it.
-const ONNX_URL = _qsOnnx || "http://localhost:8788/qwen05b-with-gates-optimum-int8.onnx";
+const _isLocalDev = typeof location !== "undefined"
+  && (location.hostname === "localhost" || location.hostname === "127.0.0.1");
+// Published by scripts/upload-onnx-hf.py. Keep this in sync with that script's
+// --repo / --path-in-repo defaults (abgunaydin/postnet-qwen05b-with-gates).
+const HF_ONNX_URL =
+  "https://huggingface.co/abgunaydin/postnet-qwen05b-with-gates/resolve/main/qwen05b-with-gates-optimum-int8.onnx";
+const LOCAL_ONNX_URL = "http://localhost:8788/qwen05b-with-gates-optimum-int8.onnx";
+const ONNX_URL = _qsOnnx || (_isLocalDev ? LOCAL_ONNX_URL : HF_ONNX_URL);
 const ONNX_DATA_URL = null;       // single-file int8 — no sidecar needed
 const ONNX_OPFS_NAME = "qwen05b-with-gates-optimum-int8.onnx";
 

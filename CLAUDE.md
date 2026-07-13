@@ -4,7 +4,7 @@ postnet-cf: federated tournament protocol on Cloudflare Workers. 34 phases shipp
 
 ## 🎯 Resume here (on "continue")
 
-_Updated: 2026-05-28 (Phase 40-4b-s6 shipped: closed the byzantine hole surfaced in 5b)_
+_Updated: 2026-07-13 (Phase 40 next-7(a) code shipped: worker default → HF Hub + scripts/upload-onnx-hf.py; one manual upload left)_
 
 **Where we are.** Phase 40-4b-s6 closed the architecture limit from session 5b's live byzantine test. Three small fixes on `src/tournament-ntk.ts` + one on `public/ntk-worker.js`:
 1. `pendingAudit` → `pendingAudits[]` queue (cap 64) with **no-self-audit rule** — incoming `audit_loss_before` from worker X can only close earliest pending entry whose `winnerId !== X`. Attackers can no longer close their own wins.
@@ -60,10 +60,33 @@ Two-tab live Chrome verified: cross-audit ledger grows correctly under attacker 
 
 **Phase 40 next-6e-multi deliverable (DONE — multi-seed):** Same setup ported to Kaggle T4 GPU against the **deployed Worker** (`postnet-cf.abgunaydin94.workers.dev`). 5 seeds × R=100, python honest + python attacker thread. **5/5 quarantine.** Attacker fraud rate **1.000 ± 0.000** — every audit in every seed flagged. Final loss **1.762674 ± 0.000294** (σ below per-round Δloss). η-adaptation cadence varies more (grow 5.0 ± 2.5) but loss outcome is invariant to seed. Surfaced and fixed along the way: pip's UA → CF 403 (verifier + notebook now send a Chrome UA), Colab CPU-only fallback hangs Qwen forward (Kaggle T4 path documented). Notebooks: `notebooks/phase40_next6e_sweep.ipynb` (Colab), `notebooks/phase40_next6e_sweep_kaggle.ipynb` (Kaggle, the one used).
 
-**The "obvious next move" if you say "go":** Phase 40 next-7. Two well-scoped candidates remaining:
-- (a) **HF Hub upload of the 994 MB int8 ONNX** + flip `ONNX_URL` default in `public/ntk-worker.js` so the demo works without a local sibling http-server. Unblocks "share the URL with one stranger" demo. ~30 min.
+**Phase 40 next-7 (a) — HF Hub hosting (SHIPPED + LIVE 2026-07-13):**
+- `public/ntk-worker.js` — `ONNX_URL` now resolves `?onnx=` → localhost `:8788`
+  (dev) → **HuggingFace Hub `HF_ONNX_URL`** (prod default). Deployed demo no
+  longer needs a local sibling http-server; localhost still auto-uses `:8788`.
+- `scripts/upload-onnx-hf.py` — self-contained uv script (PEP 723; uses the
+  cached HF token). Creates `abgunaydin/postnet-qwen05b-with-gates` + a model
+  card (Apache-2.0 / NTK-Mirror attribution) and publishes the artifact at
+  exactly the URL the worker expects.
+- **Artifact rebuilt on this machine** (the file wasn't here; original was on the
+  s5 machine). Full pipeline redone with a fresh uv env `~/postnet-cf-onnx/.venv`
+  (optimum 2.1 + optimum-onnx 0.1 + transformers 4.57 + onnx 1.22 + ort 1.27):
+  export (opset 17, dynamic batch) → `inject-gates-onnx.py` (logits diff 0.0 at
+  gate=ones) → int8 quantize → **~906 MB single file** (863.9 MiB; the s5 toolchain
+  gave 994 MB — same valid artifact, lighter export). Worker-faithful forward check
+  (batch=4 baked tokens, all 4 inputs, gate=ones CE loss 4.34 ≈ s5's 4.1) PASSED.
+- **Uploaded + verified LIVE**: `content-length 905846552`, `access-control-allow-origin: *`,
+  `accept-ranges: bytes` on the CDN 200. Xet deduped vs base Qwen → only ~400 MB
+  transferred. https://huggingface.co/abgunaydin/postnet-qwen05b-with-gates
+- **REMAINING to light up the *deployed* demo:** the HF-default code is in the
+  working tree but NOT yet committed/deployed — the live worker at
+  `postnet-cf.abgunaydin94.workers.dev` still serves the old `:8788` default.
+  Commit the next-7 changes + `npx wrangler deploy` to make the public demo load
+  the HF file with zero setup.
+
+**Still on deck after (a) deploys:**
 - (b) **Phase 41 — VerifBFL zk-SNARK** for cryptographic commitment to data shard. Replaces "trust the audit" with "verify the proof." Sybil-resistant by construction. ~1 week. The splashy paper-grade upgrade.
-- (c) **Multi-seed sweep** on the next-6 empirical (current is N=1). 5 seeds × R=200 for a publication-quality fraud-detection table. ~1 hr.
+- (c) **Multi-seed sweep** — largely covered by `40-4b-s6e-multi` (5 seeds × R=100 on Kaggle T4). Extend to R=200 for a publication-quality fraud-detection table if a paper needs it. ~1 hr.
 
 **Phase 40 next-5b deliverables (DONE):**
 - `public/ntk-worker.js` — attack mode now defined + short-circuits ONNX/ORT/snapshot loads; WebGPU EP attempt with WASM fallback (URL param `?backend=wasm|webgpu` overrides); `Response.bytes()` for single-allocation model fetch.

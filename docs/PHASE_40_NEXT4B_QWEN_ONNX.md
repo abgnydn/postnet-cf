@@ -295,21 +295,39 @@ open http://localhost:8787/ntk.html
 `?onnx=https://...` URL parameter overrides the default ONNX URL —
 useful for testing HF Hub hosted versions before flipping the default.
 
-## Production hosting (deferred)
+## Production hosting (Phase 40 next-7 — code shipped, upload pending the file)
 
 The clean production path: upload the int8 ONNX to a HuggingFace model
-repo (free public CDN, fast worldwide):
+repo (free public CDN, CORS-open, range-capable, fast worldwide). As of
+next-7 the worker default already points at HF (`HF_ONNX_URL` in
+`public/ntk-worker.js`) and there's a self-contained uploader — you just
+need to run it once from a machine that has the built ~906 MB file
+(994 MB on the original s5 toolchain; ~906 MB when rebuilt with
+optimum 2.1 / transformers 4.57 — same valid artifact):
 
 ```bash
-# one-time:
-~/ntkmirror/.venv/bin/pip install huggingface_hub
-~/ntkmirror/.venv/bin/huggingface-cli login
-~/ntkmirror/.venv/bin/huggingface-cli upload \
-   <your-user>/postnet-qwen05b-with-gates \
-   ~/postnet-cf-onnx/qwen05b-with-gates-int8.onnx \
-   qwen05b-with-gates-int8.onnx
-# then in public/ntk-worker.js, change ONNX_URL default to:
-#   "https://huggingface.co/<your-user>/postnet-qwen05b-with-gates/resolve/main/qwen05b-with-gates-int8.onnx"
+# one-time (uses your cached HF token; uv resolves huggingface_hub itself):
+uv run scripts/upload-onnx-hf.py \
+    --file ~/postnet-cf-onnx/qwen05b-with-gates-optimum-int8.onnx
+# --dry-run first to verify token + file without uploading.
+```
+
+It creates `abgunaydin/postnet-qwen05b-with-gates` (public), uploads a
+model card with Apache-2.0/NTK-Mirror attribution, and publishes the file
+at exactly the URL the worker already expects:
+
+```
+https://huggingface.co/abgunaydin/postnet-qwen05b-with-gates/resolve/main/qwen05b-with-gates-optimum-int8.onnx
+```
+
+No `ntk-worker.js` edit is needed after the upload — the default is already
+this URL (localhost still auto-falls back to the `:8788` sibling server; any
+page can override with `?onnx=<url>`). Sanity-check the published file's
+CORS + size headers with:
+
+```bash
+curl -sIL 'https://huggingface.co/abgunaydin/postnet-qwen05b-with-gates/resolve/main/qwen05b-with-gates-optimum-int8.onnx' \
+  | grep -i -E 'HTTP/|content-length|access-control-allow-origin'
 ```
 
 Alternative: R2 — costs ~$0.015/GB/month for storage + $0/egress, or
@@ -592,7 +610,9 @@ deliverable.
 - Audit-based byzantine defense alive (no in-browser attacker yet)
 
 **Deferred to a future session:**
-- HF Hub upload of the 994 MB ONNX (right now hosted on local :8788)
+- HF Hub upload of the ~906 MB ONNX — **next-7: code + uploader shipped**
+  (`scripts/upload-onnx-hf.py`, worker default now points at HF). The only
+  step left is *running* the uploader from a machine that holds the file.
 - Bump TARGET_PROPOSALS = 2 (multi-tab federation)
 - WebGPU EP attempt (~3-5× speedup if it loads our model)
 - Longer empirical run (R=200+) for paper-grade numbers

@@ -78,8 +78,9 @@
     byzantine defense via Phase 40-3's audit loop).
   </p>
   <div class="warn">
-    <b>Heavy demo.</b> First Join downloads the <b>~866 MB int8 Qwen ONNX</b>
-    into your browser's OPFS storage (cached for future visits). Forward
+    <b>Heavy demo.</b> First Join downloads the <b>~906 MB int8 Qwen ONNX</b>
+    (hosted on HuggingFace Hub) into your browser's OPFS storage (cached for
+    future visits). Forward
     passes in WebAssembly take ~1 second each; 2 SPSA trials per round = 6
     forwards = ~6 sec/round. Plan for ~10 min per 100 rounds. WebGPU
     would be 3-5× faster but is gated on browser/driver compatibility.
